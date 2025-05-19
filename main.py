@@ -1,8 +1,17 @@
 import os
 import sys
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+# Import simulator components
+from core.register_file import RegisterFile
+from core.memory import Memory
+from core.alu import ALU
+from core.control_unit import ControlUnit
+from core.pipeline_register import PipelineRegister
 from simulator import ISASimulator
 from assembler import Assembler
-from visualization.visualizer import SimulationVisualizer
+from visualization.visualizer import ISASimulatorGUI
 
 def load_assembly_file(filename):
     """Load assembly code from a file."""
@@ -10,110 +19,95 @@ def load_assembly_file(filename):
         with open(filename, 'r') as f:
             return f.read()
     except FileNotFoundError:
-        print(f"Error: File '{filename}' not found.")
         return None
 
-def run_simulation(assembly_code, max_cycles=1000, visualize=True, debug=True):
-    """Run a simulation with the given assembly code."""
+def main():
+    """Main function to run the ISA simulator with Tkinter GUI."""
+    # Create the root window
+    root = tk.Tk()
+    root.title("ISA Simulator")
+    
     # Create simulator components
-    simulator = ISASimulator(debug=debug)
-    assembler = Assembler()
+    simulator = ISASimulator(debug=True)
+    simulator.assembler = Assembler()  # Add assembler to simulator for disassembly
     
-    # Assemble the program
-    print("Assembling program...")
-    instructions = assembler.assemble(assembly_code)
+    # Create GUI
+    gui = ISASimulatorGUI(root, simulator)
     
-    if instructions is None:
-        print("Assembly failed. Check errors.")
-        return
+    # Add menu bar
+    menubar = tk.Menu(root)
     
-    # Print the assembled instructions
-    print("\nAssembled instructions:")
-    for i, instr in enumerate(instructions):
-        print(f"0x{i*4:04x}: 0x{instr:08x} - {assembler.disassemble(instr)}")
+    # File menu
+    file_menu = tk.Menu(menubar, tearoff=0)
+    file_menu.add_command(label="Open Assembly File", command=lambda: open_file(gui, simulator))
+    file_menu.add_separator()
+    file_menu.add_command(label="Exit", command=root.quit)
+    menubar.add_cascade(label="File", menu=file_menu)
     
-    # Load program into simulator
-    print("\nLoading program...")
-    simulator.load_program(instructions)
+    # View menu
+    view_menu = tk.Menu(menubar, tearoff=0)
+    view_menu.add_command(label="Update Register Plot", command=gui._update_reg_plot)
+    view_menu.add_command(label="Update Pipeline Activity", command=gui.update_pipeline_activity_plot)
+    view_menu.add_command(label="Update Instruction Mix", command=gui.update_instruction_mix_plot)
+    menubar.add_cascade(label="View", menu=view_menu)
     
-    # Create visualizer if requested
-    visualizer = None
-    if visualize:
-        visualizer = SimulationVisualizer(simulator)
+    # Help menu
+    help_menu = tk.Menu(menubar, tearoff=0)
+    help_menu.add_command(label="About", command=lambda: messagebox.showinfo("About", "ISA Simulator\nA visual simulator for a simple instruction set architecture."))
+    menubar.add_cascade(label="Help", menu=help_menu)
+    
+    root.config(menu=menubar)
     
     # Register callback for console output
     def console_output_callback(char):
-        print(f"Console output: '{char}'")
+        gui._log_to_console(f"Console output: '{char}'")
     
     simulator.memory.register_io_callback('console_out', console_output_callback)
     
-    # Run simulation
-    print("\nStarting simulation...")
+    # Check command line arguments for assembly file
+    if len(sys.argv) > 1:
+        filename = sys.argv[1]
+        assembly_code = load_assembly_file(filename)
+        if assembly_code:
+            load_program(gui, simulator, assembly_code, filename)
     
-    cycle = 0
-    while cycle < max_cycles and not simulator.control_unit.halt_flag:
-        # Record state before executing cycle
-        if visualizer:
-            visualizer.record_state()
-        
-        # Execute one cycle
-        simulator.step()
-        
-        # Print cycle information
-        print(f"Cycle {cycle}: PC = 0x{simulator.reg_file.pc:08X}")
-        
-        cycle += 1
-    
-    # Print final register state
-    print("\nFinal register state:")
-    for i in range(16):  # Print first 16 registers
-        print(f"R{i}: {simulator.reg_file.registers[i]} (0x{simulator.reg_file.registers[i]:08X})")
-    
-    # Print memory at result location
-    print("\nResult in memory:")
-    simulator.memory.dump_memory(0x10000000, 16)
-    
-    # Show visualizations if requested
-    if visualize and visualizer:
-        print("\nGenerating execution trace...")
-        visualizer.print_execution_trace()
-        
-        print("\nGenerating visualizations...")
-        visualizer.plot_register_history([1, 2, 3, 4])  # Plot key registers
-        visualizer.plot_pipeline_activity()
-        visualizer.plot_instruction_mix()
-        visualizer.plot_memory_access_pattern()
-    
-    print("\nSimulation complete!")
-    
-    return {
-        "cycles": simulator.cycles,
-        "instructions": simulator.instructions_executed,
-        "stalls": simulator.stall_cycles
-    }
+    # Start the main loop
+    root.mainloop()
 
-def main():
-    """Main function to run the ISA simulator."""
-    # Check command line arguments
-    if len(sys.argv) < 2:
-        print("Usage: python main.py <assembly_file> [--no-viz]")
-        print("Available example files:")
-        for filename in os.listdir('examples'):
-            if filename.endswith('.asm'):
-                print(f"  examples/{filename}")
+def open_file(gui, simulator):
+    """Open an assembly file and load it into the simulator."""
+    filename = filedialog.askopenfilename(
+        title="Open Assembly File",
+        filetypes=[("Assembly files", "*.asm"), ("All files", "*.*")]
+    )
+    
+    if filename:
+        assembly_code = load_assembly_file(filename)
+        if assembly_code:
+            load_program(gui, simulator, assembly_code, filename)
+        else:
+            messagebox.showerror("Error", f"Could not open file: {filename}")
+
+def load_program(gui, simulator, assembly_code, filename):
+    """Assemble and load a program into the simulator."""
+    # Assemble the program
+    gui._log_to_console(f"Assembling program from {filename}...")
+    instructions = simulator.assembler.assemble(assembly_code)
+    
+    if instructions is None:
+        gui._log_to_console("Assembly failed. Check errors.")
         return
     
-    # Parse arguments
-    filename = sys.argv[1]
-    visualize = "--no-viz" not in sys.argv
+    # Print the assembled instructions
+    gui._log_to_console("\nAssembled instructions:")
+    for i, instr in enumerate(instructions):
+        disasm = simulator.assembler.disassemble(instr)
+        gui._log_to_console(f"0x{i*4:04x}: 0x{instr:08X} - {disasm}")
     
-    # Load assembly code
-    assembly_code = load_assembly_file(filename)
-    if assembly_code is None:
-        return
-    
-    # Run simulation
-    run_simulation(assembly_code, visualize=visualize)
+    # Load program into simulator
+    gui._log_to_console("\nLoading program...")
+    gui.load_program(instructions)
+    gui._log_to_console("Program loaded successfully.")
 
 if __name__ == "__main__":
     main()

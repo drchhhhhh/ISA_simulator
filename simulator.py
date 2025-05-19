@@ -3,6 +3,7 @@ from core.memory import Memory
 from core.alu import ALU
 from core.control_unit import ControlUnit
 from core.pipeline_register import PipelineRegister
+from assembler import Assembler
 
 class ISASimulator:
     """Main simulator class integrating all components."""
@@ -12,6 +13,7 @@ class ISASimulator:
         self.memory = Memory(memory_size)
         self.alu = ALU(self.reg_file)
         self.control_unit = ControlUnit()
+        self.assembler = Assembler()  # Add assembler for disassembly
         
         # Pipeline registers
         self.if_id = PipelineRegister("IF/ID")
@@ -28,7 +30,7 @@ class ISASimulator:
         self.instructions_executed = 0
         self.stall_cycles = 0
 
-        #Debug mode
+        # Debug mode
         self.debug = debug
     
     def load_program(self, instructions, start_address=0):
@@ -52,14 +54,16 @@ class ISASimulator:
             self.cycles += 1
             
             # Print cycle information for debugging
-            print(f"Cycle {cycle}: PC = {hex(self.reg_file.pc)}")
+            if self.debug:
+                print(f"Cycle {cycle}: PC = {hex(self.reg_file.pc)}")
             
             # Handle hazards
             self._hazard_detection()
             
             # Check for termination
             if self.control_unit.halt_flag:
-                print("HALT instruction encountered")
+                if self.debug:
+                    print("HALT instruction encountered")
                 break
         
         return {
@@ -119,7 +123,8 @@ class ISASimulator:
                 # Increment PC
                 self.reg_file.pc += 4
             except ValueError as e:
-                print(f"Fetch error: {e}")
+                if self.debug:
+                    print(f"Fetch error: {e}")
                 self.control_unit.halt_flag = True
     
     def _decode_stage(self):
@@ -232,7 +237,8 @@ class ISASimulator:
                 # Store operation
                 self.memory.write_word(alu_result, self.ex_mem.read("src2_val"))
         except ValueError as e:
-            print(f"Memory access error: {e}")
+            if self.debug:
+                print(f"Memory access error: {e}")
             self.control_unit.halt_flag = True
         
         # Pass values to MEM/WB register
