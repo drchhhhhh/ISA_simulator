@@ -32,6 +32,10 @@ class ISASimulator:
 
         # Debug mode
         self.debug = debug
+
+        self.flush = False
+        self.flush_cycle_count = 0  # Track how many cycles flush has been active
+        self.stall = False
     
     def load_program(self, instructions, start_address=0):
         """Load program into memory."""
@@ -75,11 +79,15 @@ class ISASimulator:
     
     def step(self):
         """Execute a single cycle of the pipeline."""
-        # Execute pipeline stages in reverse order to prevent data overwriting
+        # Writeback stage
         self._writeback_stage()
+        # Memory stage
         self._memory_stage()
+        # Execute stage
         self._execute_stage()
+        # Decode stage
         self._decode_stage()
+        # Fetch stage
         self._fetch_stage()
         
         self.cycles += 1
@@ -97,7 +105,7 @@ class ISASimulator:
             print(f"EX/MEM: {self.ex_mem.data}")
             print(f"MEM/WB: {self.mem_wb.data}")
             print("Register File:")
-            for i in range(8):  # Print first 8 registers
+            for i in range(8):  # Print first 8 registers for brevity
                 print(f"R{i}: {self.reg_file.registers[i]} (0x{self.reg_file.registers[i]:08X})")
             print("Flags: Z={} N={} C={} V={}".format(
                 int(self.reg_file.zero_flag),
@@ -108,44 +116,26 @@ class ISASimulator:
             print()
         
         return not self.control_unit.halt_flag
-    
-    def _fetch_stage(self):
-        """Instruction Fetch (IF) stage."""
-        if not self.stall:
-            # Fetch instruction from memory at PC
-            try:
-                instruction = self.memory.read_word(self.reg_file.pc)
-                
-                # Write to IF/ID pipeline register
-                self.if_id.write("instruction", instruction)
-                self.if_id.write("pc", self.reg_file.pc)
-                
-                # Increment PC
-                self.reg_file.pc += 4
-            except ValueError as e:
-                if self.debug:
-                    print(f"Fetch error: {e}")
-                self.control_unit.halt_flag = True
-    
+
+
     def _decode_stage(self):
         """Instruction Decode (ID) stage."""
         if self.flush:
+            print("Flush active in decode stage, clearing IF/ID and ID/EX pipeline registers")
             self.if_id.clear()
+            self.id_ex.clear()  # Clear ID/EX to remove stale instructions after branch
             self.flush = False
             return
         
         instruction = self.if_id.read("instruction")
         if instruction is None:
-            return  # Nothing to decode
+            return
         
-        # Decode instruction
         decoded = self.control_unit.decode(instruction)
         
-        # Read register values
         src1_val = self.reg_file.read(decoded["src1_reg"])
         src2_val = self.reg_file.read(decoded["src2_reg"])
         
-        # Pass values to ID/EX register
         self.id_ex.write("control", {
             "reg_write": self.control_unit.reg_write,
             "mem_read": self.control_unit.mem_read,
@@ -164,61 +154,91 @@ class ISASimulator:
         self.id_ex.write("src2_reg", decoded["src2_reg"])
         self.id_ex.write("opcode", decoded["opcode"])
         self.id_ex.write("pc", self.if_id.read("pc"))
-    
+        
+        print(f"Decoded instruction 0x{instruction:08X} at PC=0x{self.if_id.read('pc'):08X}")
+        print(f"  Control signals: {self.control_unit.__dict__}")
+        print(f"  Src1 val: {src1_val}, Src2 val: {src2_val}, Immediate: {decoded['immediate']}")
+
+
+    def _fetch_stage(self):
+        """Instruction Fetch (IF) stage."""
+        if self.flush:
+            print("Flush active in fetch stage, clearing IF/ID pipeline register")
+            self.if_id.clear()
+            self.flush = False
+            return
+        
+        if not self.stall:
+            try:
+                instruction = self.memory.read_word(self.reg_file.pc)
+                self.if_id.write("instruction", instruction)
+                self.if_id.write("pc", self.reg_file.pc)
+                print(f"Fetched instruction 0x{instruction:08X} at PC=0x{self.reg_file.pc:08X}")
+                self.reg_file.pc += 4
+            except ValueError as e:
+                print(f"Fetch error: {e}")
+                self.control_unit.halt_flag = True
+        else:
+            print(f"Fetch stage stalled at PC=0x{self.reg_file.pc:08X}")
+
+
     def _execute_stage(self):
         """Execute (EX) stage."""
         control = self.id_ex.read("control")
         if control is None:
-            return  # Nothing to execute
+            return
         
         src1_val = self.id_ex.read("src1_val")
         src2_val = self.id_ex.read("src2_val")
         immediate = self.id_ex.read("immediate")
         opcode = self.id_ex.read("opcode")
+        pc = self.id_ex.read("pc")
         
-        # Determine second operand (register or immediate)
         operand2 = immediate if control["alu_src"] else src2_val
         
-        # Execute operation (map opcode to ALU operation)
-        alu_op = opcode & 0x0F  # Use lower 4 bits for ALU operation
+        if opcode == self.control_unit.MOVI:
+            alu_op = self.alu.OP_MOV
+        else:
+            alu_op = opcode & 0x0F
+        
         result = self.alu.execute(alu_op, src1_val, operand2)
         
-        # Calculate branch target if needed
         branch_target = None
         if control["branch"] or control["jump"]:
-            pc = self.id_ex.read("pc")
-            branch_target = pc + (immediate << 2)  # Scale by 4 for byte addressing
+            branch_target = pc + (immediate << 2)
         
-        # Pass values to EX/MEM register
         self.ex_mem.write("control", control)
         self.ex_mem.write("alu_result", result)
-        self.ex_mem.write("src2_val", src2_val)  # For STORE instructions
+        self.ex_mem.write("src2_val", src2_val)
         self.ex_mem.write("dest_reg", self.id_ex.read("dest_reg"))
         self.ex_mem.write("branch_target", branch_target)
-        self.ex_mem.write("opcode", opcode)  # Pass opcode for branch condition checking
+        self.ex_mem.write("opcode", opcode)
         
-        # Handle branch decisions
+        take_branch = False
         if control["branch"]:
-            take_branch = False
-            
             if opcode == self.control_unit.BEQ:
-                take_branch = self.reg_file.zero_flag
+                take_branch = (src1_val == src2_val)
             elif opcode == self.control_unit.BNE:
-                take_branch = not self.reg_file.zero_flag
+                take_branch = (src1_val != src2_val)
             elif opcode == self.control_unit.BLT:
-                take_branch = self.reg_file.negative_flag
+                take_branch = (src1_val < src2_val)
             elif opcode == self.control_unit.BGE:
-                take_branch = not self.reg_file.negative_flag
-                
+                take_branch = (src1_val >= src2_val)
+            
+            print(f"Branch instruction at PC=0x{pc:08X}")
+            print(f"  Registers: src1_val={src1_val}, src2_val={src2_val}")
+            print(f"  Immediate: {immediate} -> branch_target=0x{branch_target:08X}")
+            print(f"  Branch taken? {take_branch}")
+            
             if take_branch and branch_target is not None:
-                # Branch taken
+                print(f"Branch taken: Jumping to 0x{branch_target:08X}")
                 self.reg_file.pc = branch_target
                 self.flush = True
-                
-        elif control["jump"] and branch_target is not None:
-            # Unconditional jump
+        elif control["jump"]:
+            print(f"Jump instruction at PC=0x{pc:08X} jumping to 0x{branch_target:08X}")
             self.reg_file.pc = branch_target
             self.flush = True
+
     
     def _memory_stage(self):
         """Memory Access (MEM) stage."""

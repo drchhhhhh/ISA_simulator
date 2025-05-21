@@ -34,6 +34,7 @@ class ControlUnit:
     SRLI = 0x16
     SRAI = 0x17
     SLTI = 0x18
+    MOVI = 0x19  # Added MOVI instruction
     
     # Register move
     MOV = 0x1F
@@ -71,49 +72,59 @@ class ControlUnit:
         self.mem_to_reg = False
     
     def decode(self, instruction):
-        """Decode 32-bit instruction and set control signals."""
-        # Extract opcode (top 8 bits)
         opcode = (instruction >> 24) & 0xFF
         
-        # Extract register fields
-        dest_reg = (instruction >> 16) & 0x1F
-        src1_reg = (instruction >> 8) & 0x1F
-        src2_reg = instruction & 0x1F
+        # Extract registers as full 8 bits (matches assembler)
+        dest_reg = (instruction >> 16) & 0xFF
+        src1_reg = (instruction >> 8) & 0xFF
+        src2_reg = instruction & 0xFF
         
-        # Extract immediate value (bottom 16 bits)
+        # Default immediate extraction — adjust later per opcode type
         immediate = instruction & 0xFFFF
-        # Sign-extend if needed
-        if immediate & 0x8000:
-            immediate |= 0xFFFF0000
         
-        # Determine instruction type and set control signals
+        # For branch instructions, immediate is only 8 bits (lowest byte)
+        if opcode in (self.BEQ, self.BNE, self.BLT, self.BGE):
+            immediate = instruction & 0xFF
+            # Sign-extend 8-bit immediate
+            if immediate & 0x80:
+                immediate |= 0xFFFFFF00
+        
+        # For other instructions that use 8-bit immediate:
+        elif opcode in (self.JMP, self.CALL, self.PUSH, self.POP,
+                        self.ADDI, self.SUBI, self.ANDI, self.ORI, self.XORI,
+                        self.SLLI, self.SRLI, self.SRAI, self.SLTI,
+                        self.MOVI, self.LOAD, self.STORE, self.IO_READ, self.IO_WRITE):
+            immediate = instruction & 0xFF
+            # Sign-extend if needed
+            if immediate & 0x80:
+                immediate |= 0xFFFFFF00
+        else:
+            # For instructions that might have 16-bit immediate
+            if immediate & 0x8000:
+                immediate |= 0xFFFF0000
+        
         instr_type = self._get_instruction_type(opcode)
         self._reset_control_signals()
         
-        # Set signals based on instruction type
+        # Set control signals (unchanged)
         if instr_type == "DATA_PROCESSING":
             self.reg_write = True
-            
-            # Check if this is an immediate instruction
-            if opcode >= 0x10 and opcode <= 0x18:
+            if 0x10 <= opcode <= 0x19:
                 self.alu_src = True
-        
         elif instr_type == "MEMORY_ACCESS":
-            if opcode == self.LOAD or opcode == self.POP:
+            if opcode in (self.LOAD, self.POP):
                 self.mem_read = True
                 self.reg_write = True
                 self.mem_to_reg = True
-                self.alu_src = True  # Use immediate for address offset
-            elif opcode == self.STORE or opcode == self.PUSH:
+                self.alu_src = True
+            elif opcode in (self.STORE, self.PUSH):
                 self.mem_write = True
-                self.alu_src = True  # Use immediate for address offset
-        
+                self.alu_src = True
         elif instr_type == "CONTROL_FLOW":
-            if opcode == self.JMP or opcode == self.CALL:
+            if opcode in (self.JMP, self.CALL):
                 self.jump = True
             elif opcode in (self.BEQ, self.BNE, self.BLT, self.BGE):
                 self.branch = True
-        
         elif instr_type == "SYSTEM_OPS":
             if opcode == self.HALT:
                 self.halt_flag = True
@@ -131,6 +142,7 @@ class ControlUnit:
             "immediate": immediate,
             "type": instr_type
         }
+
     
     def _get_instruction_type(self, opcode):
         """Determine instruction type from opcode."""

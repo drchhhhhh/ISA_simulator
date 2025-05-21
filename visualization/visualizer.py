@@ -1,10 +1,11 @@
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, filedialog, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
 import time
+import os
 
 class ISASimulatorGUI:
     """Tkinter-based GUI for the ISA Simulator."""
@@ -15,9 +16,12 @@ class ISASimulatorGUI:
         self.root.title("ISA Simulator")
         self.root.geometry("1200x800")
         
-        # Setup control variables - MOVED THESE UP BEFORE USING THEM
+        # Setup control variables
         self.running = False
         self.cycle_delay = tk.DoubleVar(value=0.5)  # seconds between cycles
+        
+        # Initialize set to track used registers
+        self.used_registers = set()
         
         # Create main frame
         self.main_frame = ttk.Frame(self.root)
@@ -28,12 +32,14 @@ class ISASimulatorGUI:
         self.notebook.pack(fill=tk.BOTH, expand=True)
         
         # Create tabs
+        self.editor_tab = ttk.Frame(self.notebook)  # New editor tab
         self.simulator_tab = ttk.Frame(self.notebook)
         self.registers_tab = ttk.Frame(self.notebook)
         self.memory_tab = ttk.Frame(self.notebook)
         self.pipeline_tab = ttk.Frame(self.notebook)
         self.stats_tab = ttk.Frame(self.notebook)
         
+        self.notebook.add(self.editor_tab, text="Instruction Editor")  # Add editor tab first
         self.notebook.add(self.simulator_tab, text="Simulator")
         self.notebook.add(self.registers_tab, text="Registers")
         self.notebook.add(self.memory_tab, text="Memory")
@@ -41,6 +47,7 @@ class ISASimulatorGUI:
         self.notebook.add(self.stats_tab, text="Statistics")
         
         # Setup each tab
+        self._setup_editor_tab()  # Setup the new editor tab
         self._setup_simulator_tab()
         self._setup_registers_tab()
         self._setup_memory_tab()
@@ -52,6 +59,71 @@ class ISASimulatorGUI:
         
         # Register update function
         self.root.after(100, self._update_display)
+    
+    def _setup_editor_tab(self):
+        """Setup the instruction editor tab."""
+        frame = ttk.Frame(self.editor_tab)
+        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create a frame for instruction input
+        input_frame = ttk.LabelFrame(frame, text="Instruction Input")
+        input_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create text editor for instruction input
+        self.instruction_editor = scrolledtext.ScrolledText(input_frame, wrap=tk.WORD, height=15, font=("Courier", 10))
+        self.instruction_editor.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Add example instructions as placeholder
+        example_instructions = """# Example MIPS-like instructions
+# Format: OPCODE Rd, Rs1, Rs2 or OPCODE Rd, Rs1, #Imm
+# Comments start with ;
+
+; Data processing instructions
+ADD R1, R0, R2    ; R1 = R0 + R2
+SUB R3, R1, #5    ; R3 = R1 - 5
+MOV R4, R3        ; R4 = R3
+
+; Memory access
+LOAD R5, [R4 + 8] ; Load from memory at address R4+8
+STORE R5, [R0 + 16] ; Store R5 to memory at address R0+16
+
+; Control flow
+BEQ R1, R2, loop  ; Branch to 'loop' if R1 == R2
+JMP end           ; Jump to 'end'
+
+; Labels
+loop:
+    ADD R6, R6, #1
+    BNE R6, R7, loop
+end:
+    HALT          ; Stop execution
+"""
+        self.instruction_editor.insert(tk.END, example_instructions)
+        
+        # Control buttons
+        btn_frame = ttk.Frame(input_frame)
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(btn_frame, text="Assemble & Load", command=self._assemble_from_editor).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Clear Editor", command=self._clear_editor).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Load from File", command=self._load_file_to_editor).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Save to File", command=self._save_editor_to_file).pack(side=tk.LEFT, padx=5)
+        
+        # Error display
+        error_frame = ttk.LabelFrame(frame, text="Assembly Errors")
+        error_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.error_display = scrolledtext.ScrolledText(error_frame, wrap=tk.WORD, height=5, font=("Courier", 10))
+        self.error_display.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.error_display.config(state=tk.DISABLED)
+        
+        # Assembled instructions display
+        asm_frame = ttk.LabelFrame(frame, text="Assembled Instructions")
+        asm_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.asm_display = scrolledtext.ScrolledText(asm_frame, wrap=tk.NONE, height=10, font=("Courier", 10))
+        self.asm_display.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.asm_display.config(state=tk.DISABLED)
     
     def _setup_simulator_tab(self):
         """Setup the main simulator tab."""
@@ -146,7 +218,7 @@ class ISASimulatorGUI:
             stages_frame.columnconfigure(i, weight=1)
     
     def _setup_registers_tab(self):
-        """Setup the registers visualization tab."""
+        """Setup the registers visualization tab with automatic register tracking."""
         frame = ttk.Frame(self.registers_tab)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
@@ -184,20 +256,12 @@ class ISASimulatorGUI:
         self.reg_canvas.draw()
         self.reg_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
-        # Register selection for plotting
-        select_frame = ttk.Frame(plot_frame)
-        select_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Add info label and refresh button
+        control_frame = ttk.Frame(plot_frame)
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        ttk.Label(select_frame, text="Select registers to plot:").pack(side=tk.LEFT, padx=5)
-        
-        self.reg_to_plot = []
-        for i in range(4):  # Allow selecting 4 registers to plot
-            var = tk.StringVar(value=f"R{i}")
-            combo = ttk.Combobox(select_frame, textvariable=var, values=[f"R{j}" for j in range(32)], width=5)
-            combo.pack(side=tk.LEFT, padx=5)
-            self.reg_to_plot.append(var)
-        
-        ttk.Button(select_frame, text="Update Plot", command=self._update_reg_plot).pack(side=tk.LEFT, padx=5)
+        ttk.Label(control_frame, text="Register plot automatically shows all used registers").pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Refresh Plot", command=self._update_reg_plot).pack(side=tk.RIGHT, padx=5)
     
     def _setup_memory_tab(self):
         """Setup the memory visualization tab."""
@@ -328,6 +392,144 @@ class ISASimulatorGUI:
         self.instr_canvas.draw()
         self.instr_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
     
+    def _assemble_from_editor(self):
+        """Assemble and load instructions from the editor."""
+        # Get assembly code from editor
+        assembly_code = self.instruction_editor.get(1.0, tk.END)
+        
+        # Clear error and assembly displays
+        self._clear_error_display()
+        self._clear_asm_display()
+        
+        # Assemble the code
+        try:
+            instructions = self.simulator.assembler.assemble(assembly_code)
+            
+            if instructions is None:
+                # Display assembly errors
+                self._display_assembly_errors(self.simulator.assembler.errors)
+                return
+            
+            # Display assembled instructions
+            self._display_assembled_instructions(instructions)
+            
+            # Load program into simulator
+            self.simulator.load_program(instructions)
+            self._log_to_console("Program loaded from editor.")
+            
+            # Switch to simulator tab
+            self.notebook.select(1)  # Index 1 is the simulator tab
+            
+        except Exception as e:
+            self._display_error(f"Assembly error: {str(e)}")
+    
+    def _clear_editor(self):
+        """Clear the instruction editor."""
+        self.instruction_editor.delete(1.0, tk.END)
+    
+    def _load_file_to_editor(self):
+        """Load assembly code from a file into the editor."""
+        filename = filedialog.askopenfilename(
+            title="Open Assembly File",
+            filetypes=[("Assembly files", "*.asm"), ("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'r') as f:
+                    code = f.read()
+                    self.instruction_editor.delete(1.0, tk.END)
+                    self.instruction_editor.insert(tk.END, code)
+                self._log_to_console(f"Loaded file: {filename}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open file: {str(e)}")
+    
+    def _save_editor_to_file(self):
+        """Save the editor content to a file."""
+        filename = filedialog.asksaveasfilename(
+            title="Save Assembly File",
+            defaultextension=".asm",
+            filetypes=[("Assembly files", "*.asm"), ("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'w') as f:
+                    code = self.instruction_editor.get(1.0, tk.END)
+                    f.write(code)
+                self._log_to_console(f"Saved to file: {filename}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not save file: {str(e)}")
+    
+    def _clear_error_display(self):
+        """Clear the error display."""
+        self.error_display.config(state=tk.NORMAL)
+        self.error_display.delete(1.0, tk.END)
+        self.error_display.config(state=tk.DISABLED)
+    
+    def _clear_asm_display(self):
+        """Clear the assembled instructions display."""
+        self.asm_display.config(state=tk.NORMAL)
+        self.asm_display.delete(1.0, tk.END)
+        self.asm_display.config(state=tk.DISABLED)
+    
+    def _display_error(self, error_message):
+        """Display an error message in the error display."""
+        self.error_display.config(state=tk.NORMAL)
+        self.error_display.delete(1.0, tk.END)
+        self.error_display.insert(tk.END, error_message)
+        self.error_display.config(state=tk.DISABLED)
+    
+    def _display_assembly_errors(self, errors):
+        """Display assembly errors in the error display."""
+        self.error_display.config(state=tk.NORMAL)
+        self.error_display.delete(1.0, tk.END)
+        
+        if errors:
+            for error in errors:
+                self.error_display.insert(tk.END, f"{error}\n")
+        else:
+            self.error_display.insert(tk.END, "Unknown assembly error.")
+        
+        self.error_display.config(state=tk.DISABLED)
+    
+    def _display_assembled_instructions(self, instructions):
+        """Display assembled instructions in the assembly display."""
+        self.asm_display.config(state=tk.NORMAL)
+        self.asm_display.delete(1.0, tk.END)
+        
+        for i, instr in enumerate(instructions):
+            disasm = self.simulator.assembler.disassemble(instr)
+            self.asm_display.insert(tk.END, f"0x{i*4:04x}: 0x{instr:08X} - {disasm}\n")
+        
+        self.asm_display.config(state=tk.DISABLED)
+    
+    def _update_used_registers(self):
+        """Update the set of registers that have been used."""
+        # Check all pipeline registers for register usage
+        for pipeline_reg_name in ['if_id', 'id_ex', 'ex_mem', 'mem_wb']:
+            pipeline_reg = getattr(self.simulator, pipeline_reg_name)
+            if pipeline_reg.data:
+                if 'dest_reg' in pipeline_reg.data:
+                    dest_reg = pipeline_reg.data['dest_reg']
+                    if 0 <= dest_reg < 32:
+                        self.used_registers.add(dest_reg)
+                
+                if 'src1_reg' in pipeline_reg.data:
+                    src1_reg = pipeline_reg.data['src1_reg']
+                    if 0 <= src1_reg < 32:
+                        self.used_registers.add(src1_reg)
+                
+                if 'src2_reg' in pipeline_reg.data:
+                    src2_reg = pipeline_reg.data['src2_reg']
+                    if 0 <= src2_reg < 32:
+                        self.used_registers.add(src2_reg)
+        
+        # Also check for non-zero values in registers
+        for i, value in enumerate(self.simulator.reg_file.registers):
+            if value != 0:
+                self.used_registers.add(i)
+    
     def _step(self):
         """Execute a single cycle of the simulator."""
         if not self.simulator.control_unit.halt_flag:
@@ -336,6 +538,9 @@ class ISASimulatorGUI:
             
             # Execute one cycle
             self.simulator.step()
+            
+            # Update used registers
+            self._update_used_registers()
             
             # Update display
             self._update_display()
@@ -374,13 +579,19 @@ class ISASimulatorGUI:
         """Reset the simulator state."""
         # Create a new simulator instance
         from simulator import ISASimulator
+        from assembler import Assembler
+        
         self.simulator = ISASimulator(debug=True)
+        self.simulator.assembler = Assembler()  # Add assembler to simulator for disassembly
         
         # Clear state history
         self.state_history = []
         
         # Reset cycle counter
         self.simulator.cycles = 0
+        
+        # Reset used registers
+        self.used_registers = set()
         
         # Update display
         self._update_display()
@@ -445,6 +656,38 @@ class ISASimulatorGUI:
         
         # Update pipeline stage labels
         self._update_pipeline_stages()
+        
+        # Update register plot if we're on the registers tab
+        if self.notebook.index(self.notebook.select()) == 2:  # Registers tab (index 2 now)
+            self._update_reg_plot()
+    
+    def _update_reg_plot(self):
+        """Update the register history plot with all used registers."""
+        if not self.state_history:
+            return
+        
+        self.reg_ax.clear()
+        self.reg_ax.set_title("Register Values Over Time")
+        self.reg_ax.set_xlabel("Cycle")
+        self.reg_ax.set_ylabel("Value")
+        
+        cycles = [state['cycle'] for state in self.state_history]
+        
+        # Plot all used registers
+        for reg_num in sorted(self.used_registers):
+            if reg_num < 32:  # Ensure it's a valid register
+                values = [state['registers'][reg_num] for state in self.state_history]
+                self.reg_ax.plot(cycles, values, label=f"R{reg_num}")
+        
+        # Add legend with reasonable size and position
+        if self.used_registers:
+            # If there are many registers, use a smaller font
+            legend_font_size = max(6, min(9, 12 - len(self.used_registers) // 4))
+            self.reg_ax.legend(fontsize=legend_font_size, loc='upper left', 
+                              bbox_to_anchor=(1.01, 1), borderaxespad=0)
+        
+        self.reg_fig.tight_layout()
+        self.reg_canvas.draw()
     
     def _update_pipeline_display(self):
         """Update the pipeline registers display."""
@@ -526,33 +769,6 @@ class ISASimulatorGUI:
                     label.config(text=f"OP: 0x{opcode:02X}")
             else:
                 label.config(text="---")
-    
-    def _update_reg_plot(self):
-        """Update the register history plot."""
-        if not self.state_history:
-            return
-        
-        self.reg_ax.clear()
-        self.reg_ax.set_title("Register Values Over Time")
-        self.reg_ax.set_xlabel("Cycle")
-        self.reg_ax.set_ylabel("Value")
-        
-        cycles = [state['cycle'] for state in self.state_history]
-        
-        for reg_var in self.reg_to_plot:
-            reg_name = reg_var.get()
-            if reg_name.startswith('R'):
-                try:
-                    reg_num = int(reg_name[1:])
-                    if 0 <= reg_num < 32:
-                        values = [state['registers'][reg_num] for state in self.state_history]
-                        self.reg_ax.plot(cycles, values, label=reg_name)
-                except ValueError:
-                    pass
-        
-        self.reg_ax.legend()
-        self.reg_fig.tight_layout()
-        self.reg_canvas.draw()
     
     def _dump_memory(self):
         """Dump memory contents to the memory display."""

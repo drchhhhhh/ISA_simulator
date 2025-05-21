@@ -13,6 +13,7 @@ class ALU:
     OP_SLT = 8  # Set less than
     OP_MUL = 9  # Multiplication
     OP_DIV = 10 # Division
+    OP_MOV = 11 # Move (pass operand2 directly)
     
     def __init__(self, register_file):
         self.reg_file = register_file
@@ -70,7 +71,7 @@ class ALU:
             result = (operand1 * operand2) & 0xFFFFFFFF
             
         elif op_code == self.OP_DIV:
-        # Handle division by zero
+            # Handle division by zero
             if operand2 == 0:
                 print("Warning: Division by zero")
                 result = 0
@@ -89,6 +90,10 @@ class ALU:
                 # Perform division and convert back to 32-bit
                 result = (signed_op1 // signed_op2) & 0xFFFFFFFF
                 
+        elif op_code == self.OP_MOV:
+            # For MOVI, just pass operand2 directly
+            result = operand2
+            
         else:
             raise ValueError(f"Unknown ALU operation: {op_code}")
         
