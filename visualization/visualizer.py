@@ -74,13 +74,8 @@ class ISASimulatorGUI:
         self.instruction_editor.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Add example instructions as placeholder
-        example_instructions = """# Example MIPS-like instructions
-# Format: OPCODE Rd, Rs1, Rs2 or OPCODE Rd, Rs1, #Imm
-# Comments start with ;
-
-; Data processing instructions
-ADD R1, R0, R2    ; R1 = R0 + R2
-SUB R3, R1, #5    ; R3 = R1 - 5
+        example_instructions = """ADD R1, R0, R2    ; R1 = R0 + R2
+SUBI R3, R1, #5    ; R3 = R1 - 5
 MOV R4, R3        ; R4 = R3
 
 ; Memory access
@@ -93,7 +88,7 @@ JMP end           ; Jump to 'end'
 
 ; Labels
 loop:
-    ADD R6, R6, #1
+    ADDI R6, R6, #1
     BNE R6, R7, loop
 end:
     HALT          ; Stop execution
@@ -185,6 +180,17 @@ end:
         self.stalls_label = ttk.Label(status_grid, text="0")
         self.stalls_label.grid(row=1, column=3, sticky=tk.W, padx=5, pady=2)
         
+        # Row 3 - Add Cycle Delay display
+        ttk.Label(status_grid, text="Cycle Delay:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        self.cycle_delay_label = ttk.Label(status_grid, text=f"{int(self.cycle_delay.get() * 1000)} ms")
+        self.cycle_delay_label.grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
+
+        def on_cycle_delay_change(*args):
+            delay_ms = int(self.cycle_delay.get() * 1000)
+            self.cycle_delay_label.config(text=f"{delay_ms} ms")
+
+        self.cycle_delay.trace_add("write", on_cycle_delay_change)
+
         # Console output
         console_frame = ttk.LabelFrame(frame, text="Console Output")
         console_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -746,29 +752,36 @@ end:
                 if not self.simulator.stall:
                     try:
                         instr = self.simulator.memory.read_word(self.simulator.reg_file.pc)
-                        disasm = self.simulator.assembler.disassemble(instr)
-                        label.config(text=disasm)
+                        # Check if instruction is zero or NOP (ADD R0, R0, R0)
+                        if instr == 0x00000000:
+                            label.config(text="---")
+                        else:
+                            disasm = self.simulator.assembler.disassemble(instr)
+                            label.config(text=disasm)
                     except:
                         label.config(text="---")
                 else:
                     label.config(text="STALL")
             elif reg_data and "opcode" in reg_data:
-                # For other stages, show the instruction based on opcode
                 opcode = reg_data["opcode"]
-                try:
-                    # Create a dummy instruction to disassemble
-                    if "dest_reg" in reg_data and "src1_reg" in reg_data:
-                        instr = (opcode << 24) | (reg_data["dest_reg"] << 16) | (reg_data["src1_reg"] << 8)
-                        if "src2_reg" in reg_data:
-                            instr |= reg_data["src2_reg"]
+                
+                dest_reg = reg_data.get("dest_reg", 0)
+                src1_reg = reg_data.get("src1_reg", 0)
+                src2_reg = reg_data.get("src2_reg", 0)
+                
+                # Check if this is a NOP: opcode==0 and all regs==0 (ADD R0,R0,R0)
+                if opcode == 0 and dest_reg == 0 and src1_reg == 0 and src2_reg == 0:
+                    label.config(text="---")
+                else:
+                    try:
+                        instr = (opcode << 24) | (dest_reg << 16) | (src1_reg << 8) | src2_reg
                         disasm = self.simulator.assembler.disassemble(instr)
                         label.config(text=disasm)
-                    else:
+                    except:
                         label.config(text=f"OP: 0x{opcode:02X}")
-                except:
-                    label.config(text=f"OP: 0x{opcode:02X}")
             else:
                 label.config(text="---")
+
     
     def _dump_memory(self):
         """Dump memory contents to the memory display."""
