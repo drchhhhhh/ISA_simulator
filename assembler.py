@@ -122,6 +122,12 @@ class Assembler:
             self.errors.append(f"Line {line_num}: Unknown opcode '{opcode_str}'")
             return None
         
+        # Check for control flow instructions that cannot be assembled
+        control_flow_instructions = ["JMP", "BEQ", "BNE", "BLT", "BGE", "CALL"]
+        if opcode_str in control_flow_instructions:
+            self.errors.append(f"Line {line_num}: function {opcode_str} cannot be assembled.")
+            return None
+
         opcode = self.OPCODES[opcode_str]
         dest_reg = src1_reg = src2_reg = 0
         immediate = 0
@@ -181,57 +187,7 @@ class Assembler:
                 self.errors.append(f"Line {line_num}: Expected 'OP Rd'")
                 return None
             dest_reg = self._parse_register(parts[1])
-        
-        elif opcode_str in ["JMP", "CALL"]:
-            if len(parts) != 2:
-                self.errors.append(f"Line {line_num}: Expected 'OP Label'")
-                return None
-            target = parts[1]
-            if target in self.symbols:
-                offset = (self.symbols[target] - self.address) >> 2
-                immediate = offset & 0xFF
-            else:
-                try:
-                    immediate = self._parse_value(target) & 0xFF
-                except ValueError:
-                    self.errors.append(f"Line {line_num}: Unknown label '{target}'")
-                    return None
-        
-        elif opcode_str in ["BEQ", "BNE", "BLT", "BGE"]:
-            if len(parts) != 4:
-                self.errors.append(f"Line {line_num}: Expected format 'OP Rs1, Rs2, Label'")
-                return None
-            
-            dest_reg = self._parse_register(parts[1].rstrip(','))
-            src1_reg = self._parse_register(parts[2].rstrip(','))
-            target = parts[3]
-            
-            if target in self.symbols:
-                offset = (self.symbols[target] - self.address) >> 2
-                if offset < -128 or offset > 127:
-                    self.errors.append(f"Line {line_num}: Branch offset out of 8-bit range")
-                    return None
-                immediate = offset & 0xFF
-            else:
-                try:
-                    imm_val = self._parse_value(target)
-                    if imm_val < -128 or imm_val > 127:
-                        self.errors.append(f"Line {line_num}: Branch offset out of 8-bit range")
-                        return None
-                    immediate = imm_val & 0xFF
-                except ValueError:
-                    self.errors.append(f"Line {line_num}: Unknown label '{target}'")
-                    return None
-            
-            instruction = (opcode << 24) | (dest_reg << 16) | (src1_reg << 8) | (immediate & 0xFF)
-            
-            if self.debug:
-                print(f"Encoded instruction: {opcode_str} -> 0x{instruction:08X}")
-                print(f"  Registers: R{dest_reg}, R{src1_reg}, Offset: {immediate}")
-            
-            return instruction
-
-        
+              
         elif opcode_str == "RET":
             pass
         

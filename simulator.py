@@ -4,9 +4,10 @@ from core.alu import ALU
 from core.control_unit import ControlUnit
 from core.pipeline_register import PipelineRegister
 from assembler import Assembler
+from register_debugger import RegisterDebugger
 
 class ISASimulator:
-    """Main simulator class integrating all components."""
+    """Main simulator class integrating all components with register debugging."""
     
     def __init__(self, memory_size=1024*1024, debug=False):
         self.reg_file = RegisterFile()
@@ -33,43 +34,35 @@ class ISASimulator:
         # Debug mode
         self.debug = debug
 
-        self.flush = False
         self.flush_cycle_count = 0  # Track how many cycles flush has been active
-        self.stall = False
+        
+        # Track pipeline stages for visualization
+        self.pipeline_stages = []  # Track instructions in each stage per cycle
+        
+        # Register debugger
+        self.register_debugger = RegisterDebugger(self)
     
     def load_program(self, instructions, start_address=0):
         """Load program into memory."""
         self.memory.load_program(instructions, start_address)
         self.reg_file.pc = start_address  # Reset PC to start address
+        
+        # Clear pipeline stages history
+        self.pipeline_stages = []
     
     def run(self, max_cycles=1000):
-        """Run the simulation for specified number of cycles."""
         cycle = 0
-        
-        while cycle < max_cycles and not self.control_unit.halt_flag:
-            # Execute pipeline stages in reverse order
-            self._writeback_stage()
-            self._memory_stage()
-            self._execute_stage()
-            self._decode_stage()
-            self._fetch_stage()
-            
+        while cycle < max_cycles:
+            self.step()
             cycle += 1
-            self.cycles += 1
-            
-            # Print cycle information for debugging
-            if self.debug:
-                print(f"Cycle {cycle}: PC = {hex(self.reg_file.pc)}")
-            
-            # Handle hazards
-            self._hazard_detection()
-            
-            # Check for termination
-            if self.control_unit.halt_flag:
-                if self.debug:
-                    print("HALT instruction encountered")
-                break
-        
+            # Check if HALT is in writeback stage
+            if self.mem_wb.read("instruction") is not None:
+                opcode = (self.mem_wb.read("instruction") >> 24) & 0xFF
+                if opcode == self.control_unit.HALT:
+                    if self.debug:
+                        print("HALT instruction reached writeback stage")
+                    self.control_unit.halt_flag = True
+                    break
         return {
             "cycles": self.cycles,
             "instructions": self.instructions_executed,
@@ -78,64 +71,62 @@ class ISASimulator:
         }
     
     def step(self):
-        """Execute a single cycle of the pipeline."""
-        # Writeback stage
+        # Start tracking a new cycle
+        self.register_debugger.start_cycle(self.cycles)
+        
+        current_state = {
+            'fetch': self._get_instruction_at_pc(self.reg_file.pc),
+            'decode': self.if_id.read("instruction"),
+            'execute': self.id_ex.read("instruction"),
+            'memory': self.ex_mem.read("instruction"),
+            'writeback': self.mem_wb.read("instruction")
+        }
         self._writeback_stage()
-        # Memory stage
         self._memory_stage()
-        # Execute stage
         self._execute_stage()
-        # Decode stage
         self._decode_stage()
-        # Fetch stage
         self._fetch_stage()
-        
         self.cycles += 1
-        
-        # Handle hazards
         self._hazard_detection()
+        self.pipeline_stages.append(current_state)
         
-        # Debug output to track pipeline state
+        # Print register usage for this cycle
         if self.debug:
-            print(f"--- Cycle {self.cycles} ---")
-            print(f"PC: 0x{self.reg_file.pc:08X}")
-            print("Pipeline Registers:")
-            print(f"IF/ID: {self.if_id.data}")
-            print(f"ID/EX: {self.id_ex.data}")
-            print(f"EX/MEM: {self.ex_mem.data}")
-            print(f"MEM/WB: {self.mem_wb.data}")
-            print("Register File:")
-            for i in range(8):  # Print first 8 registers for brevity
-                print(f"R{i}: {self.reg_file.registers[i]} (0x{self.reg_file.registers[i]:08X})")
-            print("Flags: Z={} N={} C={} V={}".format(
-                int(self.reg_file.zero_flag),
-                int(self.reg_file.negative_flag),
-                int(self.reg_file.carry_flag),
-                int(self.reg_file.overflow_flag)
-            ))
-            print()
+            self.register_debugger.print_cycle_registers()
         
-        return not self.control_unit.halt_flag
-
+        return True
+    
+    def _get_instruction_at_pc(self, pc):
+        """Get the instruction at the given PC."""
+        try:
+            return self.memory.read_word(pc)
+        except:
+            return None
 
     def _decode_stage(self):
-        """Instruction Decode (ID) stage."""
         if self.flush:
             print("Flush active in decode stage, clearing IF/ID and ID/EX pipeline registers")
             self.if_id.clear()
-            self.id_ex.clear()  # Clear ID/EX to remove stale instructions after branch
+            self.id_ex.clear()
             self.flush = False
             return
-        
         instruction = self.if_id.read("instruction")
         if instruction is None:
             return
-        
         decoded = self.control_unit.decode(instruction)
         
-        src1_val = self.reg_file.read(decoded["src1_reg"])
-        src2_val = self.reg_file.read(decoded["src2_reg"])
+        # Track register reads in decode stage
+        src1_reg = decoded["src1_reg"]
+        src1_val = self.reg_file.read(src1_reg)
+        self.register_debugger.track_register_read('decode', src1_reg, src1_val)
         
+        src2_val = 0  # Default for instructions not needing src2
+        if not (decoded["opcode"] in [self.control_unit.BEQ, self.control_unit.BNE,
+                                    self.control_unit.BLT, self.control_unit.BGE]):
+            src2_reg = decoded["src2_reg"]
+            src2_val = self.reg_file.read(src2_reg)
+            self.register_debugger.track_register_read('decode', src2_reg, src2_val)
+            
         self.id_ex.write("control", {
             "reg_write": self.control_unit.reg_write,
             "mem_read": self.control_unit.mem_read,
@@ -155,9 +146,13 @@ class ISASimulator:
         self.id_ex.write("opcode", decoded["opcode"])
         self.id_ex.write("pc", self.if_id.read("pc"))
         
-        print(f"Decoded instruction 0x{instruction:08X} at PC=0x{self.if_id.read('pc'):08X}")
-        print(f"  Control signals: {self.control_unit.__dict__}")
-        print(f"  Src1 val: {src1_val}, Src2 val: {src2_val}, Immediate: {decoded['immediate']}")
+        # Pass the instruction to the next stage
+        self.id_ex.write("instruction", instruction)
+        
+        if self.debug:
+            print(f"Decoded instruction 0x{instruction:08X} at PC=0x{self.if_id.read('pc'):08X}")
+            print(f"  Control signals: {self.control_unit.__dict__}")
+            print(f"  Src1 val: {src1_val}, Src2 val: {src2_val}, Immediate: {decoded['immediate']}")
 
 
     def _fetch_stage(self):
@@ -173,13 +168,19 @@ class ISASimulator:
                 instruction = self.memory.read_word(self.reg_file.pc)
                 self.if_id.write("instruction", instruction)
                 self.if_id.write("pc", self.reg_file.pc)
-                print(f"Fetched instruction 0x{instruction:08X} at PC=0x{self.reg_file.pc:08X}")
+                
+                # Track PC register in fetch stage
+                self.register_debugger.track_register_read('fetch', 'pc', self.reg_file.pc)
+                
+                if self.debug:
+                    print(f"Fetched instruction 0x{instruction:08X} at PC=0x{self.reg_file.pc:08X}")
                 self.reg_file.pc += 4
             except ValueError as e:
                 print(f"Fetch error: {e}")
                 self.control_unit.halt_flag = True
         else:
-            print(f"Fetch stage stalled at PC=0x{self.reg_file.pc:08X}")
+            if self.debug:
+                print(f"Fetch stage stalled at PC=0x{self.reg_file.pc:08X}")
 
 
     def _execute_stage(self):
@@ -193,6 +194,15 @@ class ISASimulator:
         immediate = self.id_ex.read("immediate")
         opcode = self.id_ex.read("opcode")
         pc = self.id_ex.read("pc")
+        instruction = self.id_ex.read("instruction")
+        
+        # Track register usage in execute stage
+        src1_reg = self.id_ex.read("src1_reg")
+        src2_reg = self.id_ex.read("src2_reg")
+        self.register_debugger.track_register_read('execute', src1_reg, src1_val)
+        
+        if not control["alu_src"]:  # Only if using register for src2
+            self.register_debugger.track_register_read('execute', src2_reg, src2_val)
         
         operand2 = immediate if control["alu_src"] else src2_val
         
@@ -214,6 +224,9 @@ class ISASimulator:
         self.ex_mem.write("branch_target", branch_target)
         self.ex_mem.write("opcode", opcode)
         
+        # Pass the instruction to the next stage
+        self.ex_mem.write("instruction", instruction)
+        
         take_branch = False
         if control["branch"]:
             if opcode == self.control_unit.BEQ:
@@ -225,19 +238,26 @@ class ISASimulator:
             elif opcode == self.control_unit.BGE:
                 take_branch = (src1_val >= src2_val)
             
-            print(f"Branch instruction at PC=0x{pc:08X}")
-            print(f"  Registers: src1_val={src1_val}, src2_val={src2_val}")
-            print(f"  Immediate: {immediate} -> branch_target=0x{branch_target:08X}")
-            print(f"  Branch taken? {take_branch}")
+            if self.debug:
+                print(f"Branch instruction at PC=0x{pc:08X}")
+                print(f"  Registers: src1_val={src1_val}, src2_val={src2_val}")
+                print(f"  Immediate: {immediate} -> branch_target=0x{branch_target:08X}")
+                print(f"  Branch taken? {take_branch}")
             
             if take_branch and branch_target is not None:
-                print(f"Branch taken: Jumping to 0x{branch_target:08X}")
+                if self.debug:
+                    print(f"Branch taken: Jumping to 0x{branch_target:08X}")
                 self.reg_file.pc = branch_target
                 self.flush = True
+                # Track PC update in execute stage for branch
+                self.register_debugger.track_register_write('execute', 'pc', branch_target)
         elif control["jump"]:
-            print(f"Jump instruction at PC=0x{pc:08X} jumping to 0x{branch_target:08X}")
+            if self.debug:
+                print(f"Jump instruction at PC=0x{pc:08X} jumping to 0x{branch_target:08X}")
             self.reg_file.pc = branch_target
             self.flush = True
+            # Track PC update in execute stage for jump
+            self.register_debugger.track_register_write('execute', 'pc', branch_target)
 
     
     def _memory_stage(self):
@@ -247,15 +267,21 @@ class ISASimulator:
             return  # Nothing to access
         
         alu_result = self.ex_mem.read("alu_result")
+        instruction = self.ex_mem.read("instruction")
         mem_data = None
         
         try:
             if control["mem_read"]:
                 # Load operation
                 mem_data = self.memory.read_word(alu_result)
+                # Track memory read
+                self.register_debugger.track_register_read('memory', 'mem', alu_result)
             elif control["mem_write"]:
                 # Store operation
-                self.memory.write_word(alu_result, self.ex_mem.read("src2_val"))
+                src2_val = self.ex_mem.read("src2_val")
+                self.memory.write_word(alu_result, src2_val)
+                # Track memory write
+                self.register_debugger.track_register_write('memory', 'mem', src2_val)
         except ValueError as e:
             if self.debug:
                 print(f"Memory access error: {e}")
@@ -266,6 +292,9 @@ class ISASimulator:
         self.mem_wb.write("alu_result", alu_result)
         self.mem_wb.write("mem_data", mem_data)
         self.mem_wb.write("dest_reg", self.ex_mem.read("dest_reg"))
+        
+        # Pass the instruction to the next stage
+        self.mem_wb.write("instruction", instruction)
     
     def _writeback_stage(self):
         """Write Back (WB) stage."""
@@ -285,6 +314,8 @@ class ISASimulator:
             # Write to register file (skip R0 which is hardwired to 0)
             if dest_reg != 0:
                 self.reg_file.write(dest_reg, write_data)
+                # Track register write in writeback stage
+                self.register_debugger.track_register_write('writeback', dest_reg, write_data)
             
             self.instructions_executed += 1
     

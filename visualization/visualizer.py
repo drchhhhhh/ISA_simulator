@@ -353,6 +353,10 @@ end:
         self.pipe_canvas = FigureCanvasTkAgg(self.pipe_fig, master=plot_frame)
         self.pipe_canvas.draw()
         self.pipe_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # Add button to display pipeline history table
+        ttk.Button(plot_frame, text="Show Pipeline History Table", 
+                  command=self.display_pipeline_history).pack(pady=5)
     
     def _setup_stats_tab(self):
         """Setup the statistics visualization tab."""
@@ -537,24 +541,23 @@ end:
                 self.used_registers.add(i)
     
     def _step(self):
-        """Execute a single cycle of the simulator."""
-        if not self.simulator.control_unit.halt_flag:
-            # Record state before step
-            self._record_state()
-            
-            # Execute one cycle
+        halt_in_writeback = False
+        if self.simulator.mem_wb.read("instruction") is not None:
+            opcode = (self.simulator.mem_wb.read("instruction") >> 24) & 0xFF
+            if opcode == self.simulator.control_unit.HALT:
+                halt_in_writeback = True
+
+        if not halt_in_writeback:
+            self._record_state()  # Record before step
             self.simulator.step()
-            
-            # Update used registers
             self._update_used_registers()
-            
-            # Update display
             self._update_display()
-            
-            # Log to console
             self._log_to_console(f"Cycle {self.simulator.cycles}: PC = 0x{self.simulator.reg_file.pc:08X}")
         else:
-            self._log_to_console("Simulation halted.")
+            self._record_state()  # Record final state with HALT in writeback
+            self._update_display()
+            self._log_to_console("Simulation halted (HALT reached writeback stage).")
+            self._stop()
     
     def _run(self):
         """Run the simulation continuously."""
@@ -734,54 +737,86 @@ end:
     
     def _update_pipeline_stages(self):
         """Update the pipeline stage labels with current instructions."""
-        # This is a simplified view - in a real implementation you'd extract the actual
-        # instructions in each stage from the simulator state
-        stages = ["Fetch", "Decode", "Execute", "Memory", "Writeback"]
-        pipeline_regs = [
-            self.simulator.if_id.data,
-            self.simulator.id_ex.data,
-            self.simulator.ex_mem.data,
-            self.simulator.mem_wb.data,
-            {}  # Writeback doesn't have a "next" register
-        ]
+        # Get the current cycle's pipeline state
+        if not self.simulator.pipeline_stages:
+            return
         
-        for i, (stage, reg_data) in enumerate(zip(stages, pipeline_regs)):
+        current_state = self.simulator.pipeline_stages[-1]
+        stages = ["Fetch", "Decode", "Execute", "Memory", "Writeback"]
+        stage_keys = ["fetch", "decode", "execute", "memory", "writeback"]
+        
+        for i, (stage, key) in enumerate(zip(stages, stage_keys)):
             label = self.stage_labels[i]
+            instr = current_state[key]
             
-            if i == 0:  # Fetch stage
-                if not self.simulator.stall:
-                    try:
-                        instr = self.simulator.memory.read_word(self.simulator.reg_file.pc)
-                        # Check if instruction is zero or NOP (ADD R0, R0, R0)
-                        if instr == 0x00000000:
-                            label.config(text="---")
-                        else:
-                            disasm = self.simulator.assembler.disassemble(instr)
-                            label.config(text=disasm)
-                    except:
-                        label.config(text="---")
-                else:
-                    label.config(text="STALL")
-            elif reg_data and "opcode" in reg_data:
-                opcode = reg_data["opcode"]
-                
-                dest_reg = reg_data.get("dest_reg", 0)
-                src1_reg = reg_data.get("src1_reg", 0)
-                src2_reg = reg_data.get("src2_reg", 0)
-                
-                # Check if this is a NOP: opcode==0 and all regs==0 (ADD R0,R0,R0)
-                if opcode == 0 and dest_reg == 0 and src1_reg == 0 and src2_reg == 0:
-                    label.config(text="---")
-                else:
-                    try:
-                        instr = (opcode << 24) | (dest_reg << 16) | (src1_reg << 8) | src2_reg
-                        disasm = self.simulator.assembler.disassemble(instr)
-                        label.config(text=disasm)
-                    except:
-                        label.config(text=f"OP: 0x{opcode:02X}")
-            else:
+            if instr is None:
                 label.config(text="---")
+            else:
+                try:
+                    disasm = self.simulator.assembler.disassemble(instr)
+                    label.config(text=disasm)
+                except:
+                    label.config(text="---")
+    
+    def display_pipeline_history(self):
+        """Display the pipeline history as a table."""
+        if not self.simulator.pipeline_stages:
+            messagebox.showinfo("Pipeline History", "No pipeline history available.")
+            return
+        
+        # Create a new window for the pipeline history
+        history_window = tk.Toplevel(self.root)
+        history_window.title("Pipeline History")
+        history_window.geometry("800x600")
+        
+        # Create a frame for the table
+        frame = ttk.Frame(history_window)
+        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create a scrolled text widget for the table
+        text = scrolledtext.ScrolledText(frame, wrap=tk.NONE, font=("Courier", 10))
+        text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create the table header
+        header = "| Cycle | Fetch | Decode | Execute | Memory | Writeback |\n"
+        header += "| ----- | ----- | ------ | ------- | ------ | --------- |\n"
+        text.insert(tk.END, header)
+        
+        # Add each cycle's pipeline state to the table
+        for i, state in enumerate(self.simulator.pipeline_stages, 1):
+            row = f"| {i} | "
+            for stage in ["fetch", "decode", "execute", "memory", "writeback"]:
+                instr = state[stage]
+                if instr is None:
+                    row += "--- | "
+                else:
+                    try:
+                        disasm = self.simulator.assembler.disassemble(instr)
+                        row += f"{disasm} | "
+                    except:
+                        row += "--- | "
+            row += "\n"
+            text.insert(tk.END, row)
+        
+        # Add a button to export the table
+        ttk.Button(frame, text="Export to File", 
+                  command=lambda: self._export_pipeline_history(text.get(1.0, tk.END))).pack(pady=5)
 
+    def _export_pipeline_history(self, content):
+        """Export the pipeline history to a file."""
+        filename = filedialog.asksaveasfilename(
+            title="Export Pipeline History",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'w') as f:
+                    f.write(content)
+                messagebox.showinfo("Export Successful", f"Pipeline history exported to {filename}")
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Could not export file: {str(e)}")
     
     def _dump_memory(self):
         """Dump memory contents to the memory display."""

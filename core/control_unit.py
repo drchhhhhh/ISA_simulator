@@ -61,7 +61,7 @@ class ControlUnit:
     
     def __init__(self):
         self.halt_flag = False
-        
+        self.halt_in_pipeline = False  # New flag to track HALT instruction
         # Control signals
         self.reg_write = False
         self.mem_read = False
@@ -70,43 +70,33 @@ class ControlUnit:
         self.branch = False
         self.jump = False
         self.mem_to_reg = False
-    
+
     def decode(self, instruction):
         opcode = (instruction >> 24) & 0xFF
-        
-        # Extract registers as full 8 bits (matches assembler)
         dest_reg = (instruction >> 16) & 0xFF
         src1_reg = (instruction >> 8) & 0xFF
         src2_reg = instruction & 0xFF
-        
-        # Default immediate extraction — adjust later per opcode type
         immediate = instruction & 0xFFFF
-        
-        # For branch instructions, immediate is only 8 bits (lowest byte)
+
         if opcode in (self.BEQ, self.BNE, self.BLT, self.BGE):
             immediate = instruction & 0xFF
-            # Sign-extend 8-bit immediate
             if immediate & 0x80:
                 immediate |= 0xFFFFFF00
-        
-        # For other instructions that use 8-bit immediate:
+            src2_reg = (instruction >> 3) & 0x1F
         elif opcode in (self.JMP, self.CALL, self.PUSH, self.POP,
                         self.ADDI, self.SUBI, self.ANDI, self.ORI, self.XORI,
                         self.SLLI, self.SRLI, self.SRAI, self.SLTI,
                         self.MOVI, self.LOAD, self.STORE, self.IO_READ, self.IO_WRITE):
             immediate = instruction & 0xFF
-            # Sign-extend if needed
             if immediate & 0x80:
                 immediate |= 0xFFFFFF00
         else:
-            # For instructions that might have 16-bit immediate
             if immediate & 0x8000:
                 immediate |= 0xFFFF0000
-        
+
         instr_type = self._get_instruction_type(opcode)
         self._reset_control_signals()
-        
-        # Set control signals (unchanged)
+
         if instr_type == "DATA_PROCESSING":
             self.reg_write = True
             if 0x10 <= opcode <= 0x19:
@@ -127,13 +117,13 @@ class ControlUnit:
                 self.branch = True
         elif instr_type == "SYSTEM_OPS":
             if opcode == self.HALT:
-                self.halt_flag = True
+                self.halt_in_pipeline = True  # Set HALT tracking flag
             elif opcode == self.IO_READ:
                 self.mem_read = True
                 self.reg_write = True
             elif opcode == self.IO_WRITE:
                 self.mem_write = True
-        
+
         return {
             "opcode": opcode,
             "dest_reg": dest_reg,
