@@ -749,6 +749,10 @@ end:
         instr_frame = ttk.LabelFrame(frame, text="Instruction Mix")
         instr_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # Add button to display stats history table
+        ttk.Button(instr_frame, text="Refresh", 
+                command=self.update_instruction_mix_plot).pack(pady=5)
+        
         # Create matplotlib figure for instruction mix
         self.instr_fig = Figure(figsize=(6, 4), dpi=100)
         self.instr_ax = self.instr_fig.add_subplot(111)
@@ -1329,3 +1333,4 @@ end:
         self.pipe_ax.set_xticklabels([str(cycles[i]) for i in range(0, len(cycles), max(1, len(cycles) // 10))])
         self.pipe_fig.tight_layout()
         self.pipe_canvas.draw()
+    
