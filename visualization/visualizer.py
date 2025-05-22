@@ -388,8 +388,12 @@ end:
         plot_frame = ttk.LabelFrame(frame, text="Pipeline Activity")
         plot_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # Add button to display pipeline history table
+        ttk.Button(plot_frame, text="Refresh Pipeline Graph", 
+                command=self.update_pipeline_activity_plot).pack(pady=5)
+        
         # Create matplotlib figure for pipeline activity
-        self.pipe_fig = Figure(figsize=(6, 4), dpi=100)
+        self.pipe_fig = Figure(figsize=(5, 3), dpi=100)
         self.pipe_ax = self.pipe_fig.add_subplot(111)
         self.pipe_ax.set_title("Pipeline Activity")
         self.pipe_ax.set_xlabel("Cycle")
@@ -1290,3 +1294,38 @@ end:
             
             self.instr_fig.tight_layout()
             self.instr_canvas.draw()
+            
+    def update_pipeline_activity_plot(self):
+        """Update the pipeline activity visualization."""
+        if len(self.state_history) < 2:
+            return
+
+        self.pipe_ax.clear()
+        self.pipe_ax.set_title("Pipeline Activity")
+        self.pipe_ax.set_xlabel("Cycle")
+        self.pipe_ax.set_ylabel("Pipeline Stage")
+
+        stages = ["Fetch", "Decode", "Execute", "Memory", "Writeback"]
+        cycles = [state['cycle'] for state in self.state_history]
+
+        # Initialize activity map: one row per stage, one column per cycle
+        activity = np.zeros((5, len(cycles)))
+
+        for i, state in enumerate(self.state_history):
+            pipeline = state.get('pipeline', {})
+            
+            # Mark activity based on whether pipeline registers are non-empty
+            if pipeline.get('if_id'):    activity[1, i] = 1  # Decode
+            if pipeline.get('id_ex'):    activity[2, i] = 1  # Execute
+            if pipeline.get('ex_mem'):   activity[3, i] = 1  # Memory
+            if pipeline.get('mem_wb'):   activity[4, i] = 1  # Writeback
+            if not self.simulator.stall: activity[0, i] = 1  # Fetch (active if not stalled)
+
+        # Plot as heatmap
+        im = self.pipe_ax.imshow(activity, aspect='auto', cmap='viridis', interpolation='nearest')
+        self.pipe_ax.set_yticks(range(len(stages)))
+        self.pipe_ax.set_yticklabels(stages)
+        self.pipe_ax.set_xticks(range(0, len(cycles), max(1, len(cycles) // 10)))
+        self.pipe_ax.set_xticklabels([str(cycles[i]) for i in range(0, len(cycles), max(1, len(cycles) // 10))])
+        self.pipe_fig.tight_layout()
+        self.pipe_canvas.draw()
