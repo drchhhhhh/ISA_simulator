@@ -13,6 +13,8 @@ class ISASimulatorGUI:
     def __init__(self, root, simulator):
         self.root = root
         self.simulator = simulator
+        self.instruction_history = {}
+        self.all_instructions = {}
         self.root.title("ISA Simulator")
         self.root.geometry("1200x800")
         
@@ -22,6 +24,9 @@ class ISASimulatorGUI:
         
         # Initialize set to track used registers
         self.used_registers = set()
+        
+        # Initialize cycle tracking
+        self.cycle_history = []  # Store pipeline state for each cycle
         
         # Create main frame
         self.main_frame = ttk.Frame(self.root)
@@ -314,7 +319,7 @@ end:
         self.mem_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
     
     def _setup_pipeline_tab(self):
-        """Setup the pipeline visualization tab."""
+        """Setup the pipeline visualization tab with instruction tracking dropdown."""
         frame = ttk.Frame(self.pipeline_tab)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
@@ -330,7 +335,39 @@ end:
             reg_label_frame = ttk.LabelFrame(reg_frame, text=reg_name)
             reg_label_frame.grid(row=0, column=i, padx=5, pady=5, sticky=tk.NSEW)
             
-            reg_text = scrolledtext.ScrolledText(reg_label_frame, wrap=tk.WORD, width=25, height=10)
+            # Special handling for IF/ID - add dropdown controls
+            if reg_name == "IF/ID":
+                # Create frame for dropdown controls
+                dropdown_frame = ttk.Frame(reg_label_frame)
+                dropdown_frame.pack(fill=tk.X, padx=5, pady=5)
+                
+                ttk.Label(dropdown_frame, text="Select Instruction:").pack(anchor=tk.W)
+                
+                # Instruction dropdown
+                self.selected_instruction = tk.StringVar()
+                self.instruction_dropdown = ttk.Combobox(dropdown_frame, 
+                                                    textvariable=self.selected_instruction,
+                                                    state="readonly", width=30)
+                self.instruction_dropdown.pack(fill=tk.X, pady=2)
+                self.instruction_dropdown.bind('<<ComboboxSelected>>', self._on_instruction_selected)
+                
+                # Control buttons frame
+                button_frame = ttk.Frame(dropdown_frame)
+                button_frame.pack(fill=tk.X, pady=2)
+                
+                ttk.Button(button_frame, text="Refresh", 
+                        command=self._refresh_instruction_list).pack(side=tk.LEFT, padx=2)
+                
+                # Auto-track checkbox
+                self.auto_track_var = tk.BooleanVar(value=True)
+                ttk.Checkbutton(button_frame, text="Auto-track", 
+                            variable=self.auto_track_var).pack(side=tk.LEFT, padx=2)
+                
+                # Separator
+                ttk.Separator(reg_label_frame, orient='horizontal').pack(fill=tk.X, padx=5, pady=5)
+            
+            # Text widget for register content
+            reg_text = scrolledtext.ScrolledText(reg_label_frame, wrap=tk.WORD, width=25, height=12)
             reg_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
             self.pipeline_text[reg_name] = reg_text
         
@@ -338,12 +375,25 @@ end:
         for i in range(4):
             reg_frame.columnconfigure(i, weight=1)
         
+        # Instruction journey display (moved below pipeline registers)
+        journey_frame = ttk.LabelFrame(frame, text="Instruction Journey & Details")
+        journey_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.journey_display = scrolledtext.ScrolledText(journey_frame, wrap=tk.WORD, 
+                                                    height=6, font=("Courier", 10))
+        self.journey_display.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.journey_display.config(state=tk.DISABLED)
+        
         # Pipeline activity visualization
         plot_frame = ttk.LabelFrame(frame, text="Pipeline Activity")
         plot_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # Add button to display pipeline history table
+        ttk.Button(plot_frame, text="Refresh Pipeline Graph", 
+                command=self.update_pipeline_activity_plot).pack(pady=5)
+        
         # Create matplotlib figure for pipeline activity
-        self.pipe_fig = Figure(figsize=(6, 4), dpi=100)
+        self.pipe_fig = Figure(figsize=(5, 3), dpi=100)
         self.pipe_ax = self.pipe_fig.add_subplot(111)
         self.pipe_ax.set_title("Pipeline Activity")
         self.pipe_ax.set_xlabel("Cycle")
@@ -356,7 +406,314 @@ end:
         
         # Add button to display pipeline history table
         ttk.Button(plot_frame, text="Show Pipeline History Table", 
-                  command=self.display_pipeline_history).pack(pady=5)
+                command=self._display_instruction_journey).pack(pady=5)
+        
+        # Initialize instruction tracking data
+        self.instruction_history = {}  # Maps instruction addresses to their pipeline journey
+        self.all_instructions = {}     # Maps addresses to instruction details
+
+    def _refresh_instruction_list(self):
+        """Refresh the dropdown with all instructions that have been executed."""
+        instruction_list = []
+        
+        # Collect all unique instructions from pipeline history
+        for state in self.simulator.pipeline_stages:
+            for stage_key in ['fetch', 'decode', 'execute', 'memory', 'writeback']:
+                instr = state[stage_key]
+                if instr is not None:
+                    # Get the PC for this instruction (approximation)
+                    pc = None
+                    if hasattr(self.simulator, 'pipeline_stages') and self.simulator.pipeline_stages:
+                        # Try to find PC from pipeline registers
+                        for pipeline_state in self.simulator.pipeline_stages:
+                            for reg_name in ['if_id', 'id_ex', 'ex_mem', 'mem_wb']:
+                                if reg_name in pipeline_state and 'pc' in pipeline_state[reg_name]:
+                                    pc = pipeline_state[reg_name]['pc']
+                                    break
+                            if pc is not None:
+                                break
+                    
+                    if pc is None:
+                        pc = len(self.all_instructions) * 4  # Estimate PC
+                    
+                    try:
+                        disasm = self.simulator.assembler.disassemble(instr)
+                        instr_key = f"0x{pc:04X}: {disasm}"
+                        
+                        if instr_key not in self.all_instructions:
+                            self.all_instructions[instr_key] = {
+                                'pc': pc,
+                                'instruction': instr,
+                                'disassembly': disasm
+                            }
+                            instruction_list.append(instr_key)
+                    except:
+                        instr_key = f"0x{pc:04X}: 0x{instr:08X}"
+                        if instr_key not in self.all_instructions:
+                            self.all_instructions[instr_key] = {
+                                'pc': pc,
+                                'instruction': instr,
+                                'disassembly': f"0x{instr:08X}"
+                            }
+                            instruction_list.append(instr_key)
+        
+        # Update dropdown
+        self.instruction_dropdown['values'] = sorted(instruction_list)
+        
+        # Auto-select the most recent instruction if auto-track is enabled
+        if self.auto_track_var.get() and instruction_list:
+            self.selected_instruction.set(instruction_list[-1])
+            self._track_selected_instruction()
+
+    def _on_instruction_selected(self, event=None):
+        """Handle instruction selection from dropdown."""
+        self._track_selected_instruction()
+
+    def _track_selected_instruction(self):
+        """Track the selected instruction through the pipeline and update register displays."""
+        selected = self.selected_instruction.get()
+        if not selected or selected not in self.all_instructions:
+            # Clear all pipeline register displays if no valid selection
+            for reg_name in ["IF/ID", "ID/EX", "EX/MEM", "MEM/WB"]:
+                text_widget = self.pipeline_text[reg_name]
+                text_widget.config(state=tk.NORMAL)
+                text_widget.delete(1.0, tk.END)
+                if reg_name != "IF/ID":  # Don't clear IF/ID as it contains the dropdown
+                    text_widget.insert(tk.END, f"{reg_name} Register\n")
+                    text_widget.insert(tk.END, "=" * 20 + "\n")
+                    text_widget.insert(tk.END, "No instruction selected\n")
+                text_widget.config(state=tk.DISABLED)
+            return
+        
+        instr_info = self.all_instructions[selected]
+        target_instruction = instr_info['instruction']
+        
+        # Track this instruction through all pipeline stages
+        journey = []
+        instruction_stages = {}  # Maps cycle to stage data
+        
+        for cycle, state in enumerate(self.simulator.pipeline_stages):
+            cycle_entry = None
+            
+            # Check each pipeline stage for this instruction
+            stages_to_check = {
+                'fetch': 'IF',
+                'decode': 'ID', 
+                'execute': 'EX',
+                'memory': 'MEM',
+                'writeback': 'WB'
+            }
+            
+            for stage_key, stage_name in stages_to_check.items():
+                if state[stage_key] == target_instruction:
+                    if cycle_entry is None:
+                        cycle_entry = f"Cycle {cycle + 1}: "
+                    else:
+                        cycle_entry += ", "
+                    cycle_entry += stage_name
+                    instruction_stages[cycle] = {
+                        'stage': stage_name,
+                        'stage_key': stage_key,
+                        'state': state
+                    }
+            
+            if cycle_entry:
+                journey.append(cycle_entry)
+        
+        # Update pipeline register displays based on instruction journey
+        self._update_pipeline_registers_for_instruction(target_instruction, instruction_stages)
+        
+        # Display the journey
+        self._display_instruction_journey(selected, journey)
+
+    def _update_pipeline_registers_for_instruction(self, target_instruction, instruction_stages):
+        """Update pipeline register displays to show the instruction's journey."""
+        # Clear all pipeline registers first
+        for reg_name in ["IF/ID", "ID/EX", "EX/MEM", "MEM/WB"]:
+            text_widget = self.pipeline_text[reg_name]
+            text_widget.config(state=tk.NORMAL)
+            
+            # Don't clear IF/ID completely as it contains the dropdown
+            if reg_name == "IF/ID":
+                # Find where the register content starts (after the separator)
+                content = text_widget.get(1.0, tk.END)
+                lines = content.split('\n')
+                # Look for a line that might indicate where register content starts
+                start_line = 1.0
+                for i, line in enumerate(lines):
+                    if '=' in line or 'Register' in line:
+                        start_line = f"{i+1}.0"
+                        break
+                text_widget.delete(start_line, tk.END)
+            else:
+                text_widget.delete(1.0, tk.END)
+        
+        # Map pipeline stages to register names
+        stage_to_register = {
+            'IF': 'IF/ID',
+            'ID': 'ID/EX', 
+            'EX': 'EX/MEM',
+            'MEM': 'MEM/WB'
+        }
+        
+        # Update each register based on instruction journey
+        for cycle, stage_info in instruction_stages.items():
+            stage_name = stage_info['stage']
+            reg_name = stage_to_register.get(stage_name)
+            
+            if reg_name:
+                text_widget = self.pipeline_text[reg_name]
+                text_widget.config(state=tk.NORMAL)
+                
+                # Add header for this register
+                text_widget.insert(tk.END, f"{reg_name} Register (Cycle {cycle + 1})\n")
+                text_widget.insert(tk.END, "=" * 30 + "\n")
+                
+                # Add instruction information
+                try:
+                    disasm = self.simulator.assembler.disassemble(target_instruction)
+                    text_widget.insert(tk.END, f"Instruction: {disasm}\n")
+                except:
+                    text_widget.insert(tk.END, f"Instruction: 0x{target_instruction:08X}\n")
+                
+                text_widget.insert(tk.END, f"Stage: {stage_name}\n")
+                text_widget.insert(tk.END, f"Cycle: {cycle + 1}\n\n")
+                
+                # Add relevant pipeline register data if available
+                pipeline_regs = {
+                    "IF/ID": getattr(self.simulator, 'if_id', None),
+                    "ID/EX": getattr(self.simulator, 'id_ex', None),
+                    "EX/MEM": getattr(self.simulator, 'ex_mem', None),
+                    "MEM/WB": getattr(self.simulator, 'mem_wb', None)
+                }
+                
+                pipeline_reg = pipeline_regs.get(reg_name)
+                if pipeline_reg and hasattr(pipeline_reg, 'data'):
+                    reg_data = pipeline_reg.data
+                    if reg_data:
+                        text_widget.insert(tk.END, "Register Contents:\n")
+                        for key, value in reg_data.items():
+                            if key != 'instruction':
+                                if isinstance(value, dict):
+                                    text_widget.insert(tk.END, f"  {key}:\n")
+                                    for k, v in value.items():
+                                        text_widget.insert(tk.END, f"    {k}: {v}\n")
+                                elif key == "pc" and value is not None:
+                                    text_widget.insert(tk.END, f"  {key}: 0x{value:08X}\n")
+                                else:
+                                    text_widget.insert(tk.END, f"  {key}: {value}\n")
+                
+                # Highlight this register
+                text_widget.tag_add("highlight", 1.0, tk.END)
+                text_widget.tag_config("highlight", background="lightblue", foreground="black")
+                
+                text_widget.config(state=tk.DISABLED)
+        
+        # Fill empty registers with placeholder text
+        for reg_name in ["IF/ID", "ID/EX", "EX/MEM", "MEM/WB"]:
+            text_widget = self.pipeline_text[reg_name]
+            content = text_widget.get(1.0, tk.END).strip()
+            
+            # Check if register is empty (accounting for IF/ID dropdown content)
+            if not content or (reg_name == "IF/ID" and len(content.split('\n')) < 5):
+                text_widget.config(state=tk.NORMAL)
+                if reg_name != "IF/ID":
+                    text_widget.insert(tk.END, f"{reg_name} Register\n")
+                    text_widget.insert(tk.END, "=" * 20 + "\n")
+                    text_widget.insert(tk.END, "Instruction not in this stage\n")
+                text_widget.config(state=tk.DISABLED)
+
+    def _display_instruction_journey(self, instruction, journey):
+        """Display the instruction's journey through the pipeline."""
+        self.journey_display.config(state=tk.NORMAL)
+        self.journey_display.delete(1.0, tk.END)
+        
+        self.journey_display.insert(tk.END, f"Tracking: {instruction}\n")
+        self.journey_display.insert(tk.END, "=" * 60 + "\n\n")
+        
+        if journey:
+            self.journey_display.insert(tk.END, "Pipeline Journey:\n")
+            for entry in journey:
+                self.journey_display.insert(tk.END, f"  {entry}\n")
+            
+            # Add summary
+            self.journey_display.insert(tk.END, f"\nTotal cycles in pipeline: {len(journey)}\n")
+        else:
+            self.journey_display.insert(tk.END, "Instruction not found in pipeline history.\n")
+        
+        self.journey_display.config(state=tk.DISABLED)
+
+    def _update_display(self):
+        """Update all display elements with current simulator state."""
+        # ... (keep existing update code) ...
+        
+        # Update status labels
+        self.cycle_label.config(text=str(self.simulator.cycles))
+        self.pc_label.config(text=f"0x{self.simulator.reg_file.pc:08X}")
+        
+        flags_text = f"Z={int(self.simulator.reg_file.zero_flag)} " \
+                    f"N={int(self.simulator.reg_file.negative_flag)} " \
+                    f"C={int(self.simulator.reg_file.carry_flag)} " \
+                    f"V={int(self.simulator.reg_file.overflow_flag)}"
+        self.flags_label.config(text=flags_text)
+        
+        self.stalls_label.config(text=str(self.simulator.stall_cycles))
+        
+        # Update register display
+        for i in range(32):
+            value = self.simulator.reg_file.registers[i]
+            self.reg_labels[i].config(text=f"0x{value:08X}")
+        
+        # Update pipeline registers display (only if not tracking specific instruction)
+        if not hasattr(self, 'selected_instruction') or not self.selected_instruction.get():
+            self._update_pipeline_display()
+        
+        # Update performance metrics
+        self.total_cycles_label.config(text=str(self.simulator.cycles))
+        self.instr_exec_label.config(text=str(self.simulator.instructions_executed))
+        self.stall_cycles_label.config(text=str(self.simulator.stall_cycles))
+        
+        ipc = self.simulator.instructions_executed / max(1, self.simulator.cycles)
+        self.ipc_label.config(text=f"{ipc:.2f}")
+        
+        # Update pipeline stage labels
+        self._update_pipeline_stages()
+        
+        # Auto-refresh instruction list and tracking if enabled
+        if hasattr(self, 'auto_track_var') and self.auto_track_var.get():
+            self._refresh_instruction_list()
+        
+        # Update register plot if we're on the registers tab
+        if self.notebook.index(self.notebook.select()) == 2:  # Registers tab (index 2 now)
+            self._update_reg_plot()
+
+    def _step(self):
+        """Step the simulation and update instruction tracking."""
+        halt_in_writeback = False
+        if self.simulator.mem_wb.read("instruction") is not None:
+            opcode = (self.simulator.mem_wb.read("instruction") >> 24) & 0xFF
+            if opcode == self.simulator.control_unit.HALT:
+                halt_in_writeback = True
+
+        if not halt_in_writeback:
+            self._record_state()  # Record before step
+            self.simulator.step()
+            self._update_used_registers()
+            
+            # Update instruction tracking
+            if hasattr(self, 'auto_track_var') and self.auto_track_var.get():
+                # Auto-refresh and track the latest instruction
+                self._refresh_instruction_list()
+                if hasattr(self, 'selected_instruction') and self.selected_instruction.get():
+                    self._track_selected_instruction()
+            
+            self._update_display()
+            self._log_to_console(f"Cycle {self.simulator.cycles}: PC = 0x{self.simulator.reg_file.pc:08X}")
+        else:
+            self._record_state()  # Record final state with HALT in writeback
+            self._update_display()
+            self._log_to_console("Simulation halted (HALT reached writeback stage).")
+            self._stop()
     
     def _setup_stats_tab(self):
         """Setup the statistics visualization tab."""
@@ -391,6 +748,10 @@ end:
         # Instruction mix visualization
         instr_frame = ttk.LabelFrame(frame, text="Instruction Mix")
         instr_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Add button to display stats history table
+        ttk.Button(instr_frame, text="Refresh", 
+                command=self.update_instruction_mix_plot).pack(pady=5)
         
         # Create matplotlib figure for instruction mix
         self.instr_fig = Figure(figsize=(6, 4), dpi=100)
@@ -541,23 +902,24 @@ end:
                 self.used_registers.add(i)
     
     def _step(self):
-        halt_in_writeback = False
-        if self.simulator.mem_wb.read("instruction") is not None:
-            opcode = (self.simulator.mem_wb.read("instruction") >> 24) & 0xFF
-            if opcode == self.simulator.control_unit.HALT:
-                halt_in_writeback = True
-
-        if not halt_in_writeback:
-            self._record_state()  # Record before step
+        """Execute a single cycle of the simulator."""
+        if not self.simulator.control_unit.halt_flag:
+            # Record state before step
+            self._record_state()
+            
+            # Execute one cycle
             self.simulator.step()
+            
+            # Update used registers
             self._update_used_registers()
+            
+            # Update display
             self._update_display()
+            
+            # Log to console
             self._log_to_console(f"Cycle {self.simulator.cycles}: PC = 0x{self.simulator.reg_file.pc:08X}")
         else:
-            self._record_state()  # Record final state with HALT in writeback
-            self._update_display()
-            self._log_to_console("Simulation halted (HALT reached writeback stage).")
-            self._stop()
+            self._log_to_console("Simulation halted.")
     
     def _run(self):
         """Run the simulation continuously."""
@@ -737,86 +1099,54 @@ end:
     
     def _update_pipeline_stages(self):
         """Update the pipeline stage labels with current instructions."""
-        # Get the current cycle's pipeline state
-        if not self.simulator.pipeline_stages:
-            return
-        
-        current_state = self.simulator.pipeline_stages[-1]
+        # This is a simplified view - in a real implementation you'd extract the actual
+        # instructions in each stage from the simulator state
         stages = ["Fetch", "Decode", "Execute", "Memory", "Writeback"]
-        stage_keys = ["fetch", "decode", "execute", "memory", "writeback"]
+        pipeline_regs = [
+            self.simulator.if_id.data,
+            self.simulator.id_ex.data,
+            self.simulator.ex_mem.data,
+            self.simulator.mem_wb.data,
+            {}  # Writeback doesn't have a "next" register
+        ]
         
-        for i, (stage, key) in enumerate(zip(stages, stage_keys)):
+        for i, (stage, reg_data) in enumerate(zip(stages, pipeline_regs)):
             label = self.stage_labels[i]
-            instr = current_state[key]
             
-            if instr is None:
-                label.config(text="---")
-            else:
-                try:
-                    disasm = self.simulator.assembler.disassemble(instr)
-                    label.config(text=disasm)
-                except:
+            if i == 0:  # Fetch stage
+                if not self.simulator.stall:
+                    try:
+                        instr = self.simulator.memory.read_word(self.simulator.reg_file.pc)
+                        # Check if instruction is zero or NOP (ADD R0, R0, R0)
+                        if instr == 0x00000000:
+                            label.config(text="---")
+                        else:
+                            disasm = self.simulator.assembler.disassemble(instr)
+                            label.config(text=disasm)
+                    except:
+                        label.config(text="---")
+                else:
+                    label.config(text="STALL")
+            elif reg_data and "opcode" in reg_data:
+                opcode = reg_data["opcode"]
+                
+                dest_reg = reg_data.get("dest_reg", 0)
+                src1_reg = reg_data.get("src1_reg", 0)
+                src2_reg = reg_data.get("src2_reg", 0)
+                
+                # Check if this is a NOP: opcode==0 and all regs==0 (ADD R0,R0,R0)
+                if opcode == 0 and dest_reg == 0 and src1_reg == 0 and src2_reg == 0:
                     label.config(text="---")
-    
-    def display_pipeline_history(self):
-        """Display the pipeline history as a table."""
-        if not self.simulator.pipeline_stages:
-            messagebox.showinfo("Pipeline History", "No pipeline history available.")
-            return
-        
-        # Create a new window for the pipeline history
-        history_window = tk.Toplevel(self.root)
-        history_window.title("Pipeline History")
-        history_window.geometry("800x600")
-        
-        # Create a frame for the table
-        frame = ttk.Frame(history_window)
-        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Create a scrolled text widget for the table
-        text = scrolledtext.ScrolledText(frame, wrap=tk.NONE, font=("Courier", 10))
-        text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Create the table header
-        header = "| Cycle | Fetch | Decode | Execute | Memory | Writeback |\n"
-        header += "| ----- | ----- | ------ | ------- | ------ | --------- |\n"
-        text.insert(tk.END, header)
-        
-        # Add each cycle's pipeline state to the table
-        for i, state in enumerate(self.simulator.pipeline_stages, 1):
-            row = f"| {i} | "
-            for stage in ["fetch", "decode", "execute", "memory", "writeback"]:
-                instr = state[stage]
-                if instr is None:
-                    row += "--- | "
                 else:
                     try:
+                        instr = (opcode << 24) | (dest_reg << 16) | (src1_reg << 8) | src2_reg
                         disasm = self.simulator.assembler.disassemble(instr)
-                        row += f"{disasm} | "
+                        label.config(text=disasm)
                     except:
-                        row += "--- | "
-            row += "\n"
-            text.insert(tk.END, row)
-        
-        # Add a button to export the table
-        ttk.Button(frame, text="Export to File", 
-                  command=lambda: self._export_pipeline_history(text.get(1.0, tk.END))).pack(pady=5)
+                        label.config(text=f"OP: 0x{opcode:02X}")
+            else:
+                label.config(text="---")
 
-    def _export_pipeline_history(self, content):
-        """Export the pipeline history to a file."""
-        filename = filedialog.asksaveasfilename(
-            title="Export Pipeline History",
-            defaultextension=".txt",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
-        )
-        
-        if filename:
-            try:
-                with open(filename, 'w') as f:
-                    f.write(content)
-                messagebox.showinfo("Export Successful", f"Pipeline history exported to {filename}")
-            except Exception as e:
-                messagebox.showerror("Export Error", f"Could not export file: {str(e)}")
     
     def _dump_memory(self):
         """Dump memory contents to the memory display."""
@@ -968,3 +1298,39 @@ end:
             
             self.instr_fig.tight_layout()
             self.instr_canvas.draw()
+            
+    def update_pipeline_activity_plot(self):
+        """Update the pipeline activity visualization."""
+        if len(self.state_history) < 2:
+            return
+
+        self.pipe_ax.clear()
+        self.pipe_ax.set_title("Pipeline Activity")
+        self.pipe_ax.set_xlabel("Cycle")
+        self.pipe_ax.set_ylabel("Pipeline Stage")
+
+        stages = ["Fetch", "Decode", "Execute", "Memory", "Writeback"]
+        cycles = [state['cycle'] for state in self.state_history]
+
+        # Initialize activity map: one row per stage, one column per cycle
+        activity = np.zeros((5, len(cycles)))
+
+        for i, state in enumerate(self.state_history):
+            pipeline = state.get('pipeline', {})
+            
+            # Mark activity based on whether pipeline registers are non-empty
+            if pipeline.get('if_id'):    activity[1, i] = 1  # Decode
+            if pipeline.get('id_ex'):    activity[2, i] = 1  # Execute
+            if pipeline.get('ex_mem'):   activity[3, i] = 1  # Memory
+            if pipeline.get('mem_wb'):   activity[4, i] = 1  # Writeback
+            if not self.simulator.stall: activity[0, i] = 1  # Fetch (active if not stalled)
+
+        # Plot as heatmap
+        im = self.pipe_ax.imshow(activity, aspect='auto', cmap='viridis', interpolation='nearest')
+        self.pipe_ax.set_yticks(range(len(stages)))
+        self.pipe_ax.set_yticklabels(stages)
+        self.pipe_ax.set_xticks(range(0, len(cycles), max(1, len(cycles) // 10)))
+        self.pipe_ax.set_xticklabels([str(cycles[i]) for i in range(0, len(cycles), max(1, len(cycles) // 10))])
+        self.pipe_fig.tight_layout()
+        self.pipe_canvas.draw()
+    

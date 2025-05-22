@@ -13,6 +13,8 @@ class ISASimulator:
         self.reg_file = RegisterFile()
         self.memory = Memory(memory_size)
         self.alu = ALU(self.reg_file)
+        self.instruction_history = {}
+        self.all_instructions = {}
         self.control_unit = ControlUnit()
         self.assembler = Assembler()  # Add assembler for disassembly
         
