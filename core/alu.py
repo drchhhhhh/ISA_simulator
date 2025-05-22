@@ -27,11 +27,13 @@ class ALU:
         operand2 = operand2 & 0xFFFFFFFF
         
         if op_code == self.OP_ADD:
+            print(f"ADD: {operand1} + {operand2}")
             result = (operand1 + operand2) & 0xFFFFFFFF
             # Check for carry
             self.reg_file.carry_flag = (operand1 + operand2) > 0xFFFFFFFF
             
         elif op_code == self.OP_SUB:
+            print(f"SUB: {operand1} - {operand2}")
             result = (operand1 - operand2) & 0xFFFFFFFF
             # Check for borrow
             self.reg_file.carry_flag = operand1 >= operand2
@@ -67,10 +69,12 @@ class ALU:
             result = 1 if operand1 < operand2 else 0
             
         elif op_code == self.OP_MUL:
+            print(f"MUL: {operand1} * {operand2}")
             # Simple multiplication, ignoring overflow
             result = (operand1 * operand2) & 0xFFFFFFFF
             
         elif op_code == self.OP_DIV:
+            print(f"DIV: {operand1} / {operand2}")
             # Handle division by zero
             if operand2 == 0:
                 print("Warning: Division by zero")
