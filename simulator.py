@@ -451,10 +451,13 @@ class ISASimulator:
         self.mem_wb.write("instruction", instruction)
     
     def _writeback_stage(self):
-        """Write Back (WB) stage."""
+        """Write Back (WB) stage with HALT detection."""
         control = self.mem_wb.read("control")
         if control is None:
             return  # Nothing to write back
+        
+        # Get the opcode to check for HALT
+        opcode = self.mem_wb.read("opcode")
         
         if control["reg_write"]:
             dest_reg = self.mem_wb.read("dest_reg")
@@ -474,13 +477,15 @@ class ISASimulator:
                     print(f"Writeback: R{dest_reg} = 0x{write_data:08X} ({write_data})")
             
             self.instructions_executed += 1
-            
-            # Check if this is a HALT instruction
-            opcode = self.mem_wb.read("opcode")
-            if opcode == self.control_unit.HALT:
-                if self.debug:
-                    print("HALT instruction in writeback stage")
-                self.control_unit.halt_flag = True
+        
+        # Check if this is a HALT instruction - this should be the final check
+        if opcode == self.control_unit.HALT:
+            if self.debug:
+                print("HALT instruction completed writeback stage - terminating simulation")
+            self.control_unit.halt_flag = True
+            return True  # Return True to indicate simulation should stop
+        
+        return False  # Continue simulation
     
     def _hazard_detection(self):
         """Enhanced hazard detection for data dependencies."""
