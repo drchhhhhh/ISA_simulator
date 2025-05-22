@@ -4,7 +4,6 @@ from core.alu import ALU
 from core.control_unit import ControlUnit
 from core.pipeline_register import PipelineRegister
 from assembler import Assembler
-from register_debugger import RegisterDebugger
 
 class ISASimulator:
     """Main simulator class integrating all components with register debugging."""
@@ -38,10 +37,7 @@ class ISASimulator:
         
         # Track pipeline stages for visualization
         self.pipeline_stages = []  # Track instructions in each stage per cycle
-        
-        # Register debugger
-        self.register_debugger = RegisterDebugger(self)
-    
+            
     def load_program(self, instructions, start_address=0):
         """Load program into memory."""
         self.memory.load_program(instructions, start_address)
