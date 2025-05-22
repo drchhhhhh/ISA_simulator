@@ -79,24 +79,33 @@ class ISASimulatorGUI:
         self.instruction_editor.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Add example instructions as placeholder
-        example_instructions = """ADD R1, R0, R2    ; R1 = R0 + R2
-SUBI R3, R1, #5    ; R3 = R1 - 5
-MOV R4, R3        ; R4 = R3
+        example_instructions = """
+; arithmetic_operations.asm
+; Demonstrates basic arithmetic operations
 
-; Memory access
-LOAD R5, [R4 + 8] ; Load from memory at address R4+8
-STORE R5, [R0 + 16] ; Store R5 to memory at address R0+16
+; Initialize registers with values
+ADDI R1, R0, #5     ; R1 = 5
+ADDI R2, R0, #10    ; R2 = 10
 
-; Control flow
-BEQ R1, R2, loop  ; Branch to 'loop' if R1 == R2
-JMP end           ; Jump to 'end'
+; Addition
+ADD R3, R1, R2      ; R3 = R1 + R2 = 15
 
-; Labels
-loop:
-    ADDI R6, R6, #1
-    BNE R6, R7, loop
-end:
-    HALT          ; Stop execution
+; Subtraction
+SUB R4, R2, R1      ; R4 = R2 - R1 = 5
+
+; Multiplication
+MUL R5, R1, R2      ; R5 = R1 * R2 = 50
+
+; Division
+DIV R6, R5, R2      ; R6 = R5 / R2 = 5
+
+; Store results to memory
+STORE R3, [R0 + 0x10000000]  ; Store addition result
+STORE R4, [R0 + 0x10000004]  ; Store subtraction result
+STORE R5, [R0 + 0x10000008]  ; Store multiplication result
+STORE R6, [R0 + 0x1000000C]  ; Store division result
+
+HALT
 """
         self.instruction_editor.insert(tk.END, example_instructions)
         
@@ -275,7 +284,7 @@ end:
         ttk.Button(control_frame, text="Refresh Plot", command=self._update_reg_plot).pack(side=tk.RIGHT, padx=5)
     
     def _setup_memory_tab(self):
-        """Setup the memory visualization tab."""
+        """Setup the memory visualization tab with a proper table."""
         frame = ttk.Frame(self.memory_tab)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
@@ -295,16 +304,72 @@ end:
         
         ttk.Button(control_frame, text="Dump Memory", command=self._dump_memory).pack(side=tk.LEFT, padx=5)
         
-        # Memory display
+        # Add filter option for empty rows
+        self.hide_empty_rows = tk.BooleanVar(value=True)
+        ttk.Checkbutton(control_frame, text="Hide Empty Rows", 
+                    variable=self.hide_empty_rows,
+                    command=self._dump_memory).pack(side=tk.LEFT, padx=15)
+        
+        # Memory display as a table
         mem_frame = ttk.LabelFrame(frame, text="Memory Dump")
         mem_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        self.mem_display = scrolledtext.ScrolledText(mem_frame, wrap=tk.NONE, font=("Courier", 10))
-        self.mem_display.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Create a frame for the table
+        table_frame = ttk.Frame(mem_frame)
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create a treeview for the memory table
+        columns = ("address", "hex_value", "dec_value", "instruction")
+        self.memory_table = ttk.Treeview(table_frame, columns=columns, show="headings")
+        
+        # Define column headings
+        self.memory_table.heading("address", text="Address")
+        self.memory_table.heading("hex_value", text="Value (hex)")
+        self.memory_table.heading("dec_value", text="Value (dec)")
+        self.memory_table.heading("instruction", text="Instruction")
+        
+        # Define column widths
+        self.memory_table.column("address", width=100, anchor="w")
+        self.memory_table.column("hex_value", width=100, anchor="w")
+        self.memory_table.column("dec_value", width=100, anchor="w")
+        self.memory_table.column("instruction", width=300, anchor="w")
+        
+        # Add scrollbars
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.memory_table.yview)
+        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.memory_table.xview)
+        self.memory_table.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        # Grid layout for table and scrollbars
+        self.memory_table.grid(column=0, row=0, sticky="nsew")
+        vsb.grid(column=1, row=0, sticky="ns")
+        hsb.grid(column=0, row=1, sticky="ew")
+        
+        # Configure grid weights
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
         
         # Memory access pattern visualization
         plot_frame = ttk.LabelFrame(frame, text="Memory Access Pattern")
         plot_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Add control buttons for memory access pattern
+        mem_control_frame = ttk.Frame(plot_frame)
+        mem_control_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(mem_control_frame, text="Refresh Memory Access Graph", 
+                command=self._update_memory_access_graph).pack(side=tk.LEFT, padx=5)
+        
+        # Add filter options
+        self.show_reads = tk.BooleanVar(value=True)
+        self.show_writes = tk.BooleanVar(value=True)
+        
+        ttk.Checkbutton(mem_control_frame, text="Show Reads", 
+                    variable=self.show_reads,
+                    command=self._update_memory_access_graph).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Checkbutton(mem_control_frame, text="Show Writes", 
+                    variable=self.show_writes,
+                    command=self._update_memory_access_graph).pack(side=tk.LEFT, padx=5)
         
         # Create matplotlib figure for memory access
         self.mem_fig = Figure(figsize=(6, 4), dpi=100)
@@ -317,7 +382,7 @@ end:
         self.mem_canvas = FigureCanvasTkAgg(self.mem_fig, master=plot_frame)
         self.mem_canvas.draw()
         self.mem_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-    
+        
     def _setup_pipeline_tab(self):
         """Setup the pipeline visualization tab with instruction tracking dropdown."""
         frame = ttk.Frame(self.pipeline_tab)
@@ -1033,7 +1098,7 @@ end:
             self._update_reg_plot()
     
     def _update_reg_plot(self):
-        """Update the register history plot with all used registers."""
+        """Update the register history plot with only non-zero registers."""
         if not self.state_history:
             return
         
@@ -1044,18 +1109,27 @@ end:
         
         cycles = [state['cycle'] for state in self.state_history]
         
-        # Plot all used registers
+        # Track which registers have non-zero values
+        non_zero_registers = set()
         for reg_num in sorted(self.used_registers):
             if reg_num < 32:  # Ensure it's a valid register
-                values = [state['registers'][reg_num] for state in self.state_history]
-                self.reg_ax.plot(cycles, values, label=f"R{reg_num}")
+                # Check if this register ever has a non-zero value
+                for state in self.state_history:
+                    if state['registers'][reg_num] != 0:
+                        non_zero_registers.add(reg_num)
+                        break
+        
+        # Plot only registers with non-zero values
+        for reg_num in sorted(non_zero_registers):
+            values = [state['registers'][reg_num] for state in self.state_history]
+            self.reg_ax.plot(cycles, values, label=f"R{reg_num}")
         
         # Add legend with reasonable size and position
-        if self.used_registers:
+        if non_zero_registers:
             # If there are many registers, use a smaller font
-            legend_font_size = max(6, min(9, 12 - len(self.used_registers) // 4))
+            legend_font_size = max(6, min(9, 12 - len(non_zero_registers) // 4))
             self.reg_ax.legend(fontsize=legend_font_size, loc='upper left', 
-                              bbox_to_anchor=(1.01, 1), borderaxespad=0)
+                            bbox_to_anchor=(1.01, 1), borderaxespad=0)
         
         self.reg_fig.tight_layout()
         self.reg_canvas.draw()
@@ -1149,7 +1223,7 @@ end:
 
     
     def _dump_memory(self):
-        """Dump memory contents to the memory display."""
+        """Dump memory contents to the memory table with instruction disassembly."""
         try:
             # Parse address and length
             addr_str = self.mem_addr_var.get()
@@ -1160,13 +1234,9 @@ end:
             
             length = int(self.mem_len_var.get())
             
-            # Clear display
-            self.mem_display.config(state=tk.NORMAL)
-            self.mem_display.delete(1.0, tk.END)
-            
-            # Add header
-            self.mem_display.insert(tk.END, "Address    | Value (hex) | Value (dec) | ASCII\n")
-            self.mem_display.insert(tk.END, "-" * 60 + "\n")
+            # Clear the table
+            for item in self.memory_table.get_children():
+                self.memory_table.delete(item)
             
             # Dump memory
             end_address = start_address + length
@@ -1174,27 +1244,46 @@ end:
                 try:
                     value = self.simulator.memory.read_word(addr)
                     
-                    # Try to interpret as ASCII
-                    ascii_repr = ""
-                    for i in range(4):
-                        byte_val = (value >> (i * 8)) & 0xFF
-                        if 32 <= byte_val <= 126:  # Printable ASCII
-                            ascii_repr += chr(byte_val)
-                        else:
-                            ascii_repr += "."
+                    # Skip empty rows if option is selected
+                    if self.hide_empty_rows.get() and value == 0:
+                        continue
                     
-                    line = f"0x{addr:08X} | 0x{value:08X} | {value:10} | {ascii_repr}\n"
-                    self.mem_display.insert(tk.END, line)
+                    # Try to disassemble the instruction
+                    instruction = "---"
+                    if addr < 0x10000000:  # Only disassemble code segment
+                        try:
+                            instruction = self.simulator.assembler.disassemble(value)
+                        except:
+                            pass
+                    
+                    # Add row to table
+                    self.memory_table.insert("", "end", values=(
+                        f"0x{addr:08X}",
+                        f"0x{value:08X}",
+                        str(value),
+                        instruction
+                    ))
+                    
                 except Exception as e:
-                    self.mem_display.insert(tk.END, f"0x{addr:08X} | Error: {str(e)}\n")
-            
-            self.mem_display.config(state=tk.DISABLED)
+                    self.memory_table.insert("", "end", values=(
+                        f"0x{addr:08X}",
+                        "Error",
+                        str(e),
+                        "---"
+                    ))
             
         except ValueError as e:
-            self.mem_display.config(state=tk.NORMAL)
-            self.mem_display.delete(1.0, tk.END)
-            self.mem_display.insert(tk.END, f"Error: {str(e)}")
-            self.mem_display.config(state=tk.DISABLED)
+            # Clear the table
+            for item in self.memory_table.get_children():
+                self.memory_table.delete(item)
+            
+            # Show error
+            self.memory_table.insert("", "end", values=(
+                "Error",
+                str(e),
+                "",
+                ""
+            ))
     
     def _log_to_console(self, message):
         """Log a message to the console display."""
@@ -1334,3 +1423,80 @@ end:
         self.pipe_fig.tight_layout()
         self.pipe_canvas.draw()
     
+    def _update_memory_access_graph(self):
+        """Update the memory access pattern visualization with enhanced features."""
+        self.mem_ax.clear()
+        
+        # Get memory access data
+        memory_accesses = []
+        
+        # Collect memory access data from simulator history
+        for cycle, cycle_data in self.simulator.register_debugger.register_usage.items():
+            if 'memory' in cycle_data:
+                for reg_name, details in cycle_data['memory'].items():
+                    if reg_name == 'mem':
+                        address = details['value']
+                        operation = details['operation']
+                        if (operation == 'read' and self.show_reads.get()) or \
+                        (operation == 'write' and self.show_writes.get()):
+                            memory_accesses.append({
+                                'cycle': cycle,
+                                'address': address,
+                                'operation': operation
+                            })
+        
+        # Choose visualization type based on data
+        if not memory_accesses:
+            self.mem_ax.set_title("No Memory Accesses Recorded")
+            self.mem_canvas.draw()
+            return
+        
+        # Group accesses by address and operation
+        address_counts = {}
+        for access in memory_accesses:
+            key = (access['address'], access['operation'])
+            if key not in address_counts:
+                address_counts[key] = 0
+            address_counts[key] += 1
+        
+        # Prepare data for bar chart
+        read_addresses = []
+        read_counts = []
+        write_addresses = []
+        write_counts = []
+        
+        for (addr, op), count in sorted(address_counts.items()):
+            if op == 'read':
+                read_addresses.append(f"0x{addr:X}")
+                read_counts.append(count)
+            else:  # write
+                write_addresses.append(f"0x{addr:X}")
+                write_counts.append(count)
+        
+        # Plot bar chart
+        bar_width = 0.35
+        index = np.arange(len(set(read_addresses + write_addresses)))
+        
+        if read_counts and self.show_reads.get():
+            self.mem_ax.bar(index - bar_width/2, read_counts, bar_width, 
+                        color='blue', alpha=0.7, label='Reads')
+        
+        if write_counts and self.show_writes.get():
+            self.mem_ax.bar(index + bar_width/2, write_counts, bar_width, 
+                        color='red', alpha=0.7, label='Writes')
+        
+        # Set labels and legend
+        self.mem_ax.set_title("Memory Access Pattern")
+        self.mem_ax.set_xlabel("Address")
+        self.mem_ax.set_ylabel("Access Count")
+        
+        # Set x-axis labels
+        all_addresses = sorted(set(read_addresses + write_addresses))
+        self.mem_ax.set_xticks(index)
+        self.mem_ax.set_xticklabels(all_addresses, rotation=45, ha='right')
+        
+        if (read_counts and self.show_reads.get()) or (write_counts and self.show_writes.get()):
+            self.mem_ax.legend()
+        
+        self.mem_fig.tight_layout()
+        self.mem_canvas.draw()
