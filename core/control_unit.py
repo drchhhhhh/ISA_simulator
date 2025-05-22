@@ -72,12 +72,14 @@ class ControlUnit:
         self.mem_to_reg = False
 
     def decode(self, instruction):
+        """Decode an instruction and set control signals."""
         opcode = (instruction >> 24) & 0xFF
         dest_reg = (instruction >> 16) & 0xFF
         src1_reg = (instruction >> 8) & 0xFF
         src2_reg = instruction & 0xFF
         immediate = instruction & 0xFFFF
 
+        # Handle different instruction formats
         if opcode in (self.BEQ, self.BNE, self.BLT, self.BGE):
             immediate = instruction & 0xFF
             if immediate & 0x80:
@@ -99,7 +101,7 @@ class ControlUnit:
 
         if instr_type == "DATA_PROCESSING":
             self.reg_write = True
-            if 0x10 <= opcode <= 0x19:
+            if 0x10 <= opcode <= 0x19:  # Immediate versions
                 self.alu_src = True
         elif instr_type == "MEMORY_ACCESS":
             if opcode in (self.LOAD, self.POP):
@@ -117,7 +119,7 @@ class ControlUnit:
                 self.branch = True
         elif instr_type == "SYSTEM_OPS":
             if opcode == self.HALT:
-                self.halt_in_pipeline = True  # Set HALT tracking flag
+                self.halt_in_pipeline = True
             elif opcode == self.IO_READ:
                 self.mem_read = True
                 self.reg_write = True

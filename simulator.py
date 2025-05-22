@@ -13,8 +13,6 @@ class ISASimulator:
         self.reg_file = RegisterFile()
         self.memory = Memory(memory_size)
         self.alu = ALU(self.reg_file)
-        self.instruction_history = {}
-        self.all_instructions = {}
         self.control_unit = ControlUnit()
         self.assembler = Assembler()  # Add assembler for disassembly
         
@@ -76,14 +74,6 @@ class ISASimulator:
         # Start tracking a new cycle
         self.register_debugger.start_cycle(self.cycles)
         
-        # Check if HALT has reached writeback - can terminate early
-        if self.mem_wb.read("instruction") is not None:
-            opcode = (self.mem_wb.read("instruction") >> 24) & 0xFF
-            if opcode == self.control_unit.HALT:
-                print("HALT instruction reached writeback stage, terminating simulation")
-                self.control_unit.halt_flag = True
-                return False
-        
         current_state = {
             'fetch': self._get_instruction_at_pc(self.reg_file.pc),
             'decode': self.if_id.read("instruction"),
@@ -91,13 +81,18 @@ class ISASimulator:
             'memory': self.ex_mem.read("instruction"),
             'writeback': self.mem_wb.read("instruction")
         }
+        
+        # Execute pipeline stages in reverse order to avoid overwriting data
         self._writeback_stage()
         self._memory_stage()
         self._execute_stage()
         self._decode_stage()
         self._fetch_stage()
-        self.cycles += 1
+        
+        # Detect hazards after executing all stages
         self._hazard_detection()
+        
+        self.cycles += 1
         self.pipeline_stages.append(current_state)
         
         # Print register usage for this cycle
@@ -114,11 +109,11 @@ class ISASimulator:
             return None
 
     def _decode_stage(self):
-        """Decode stage with fixed operand handling."""
+        """Instruction Decode (ID) stage with data forwarding."""
         if self.flush:
-            print("Flush active in decode stage, clearing IF/ID pipeline register")
+            if self.debug:
+                print("Flush active in decode stage, clearing IF/ID pipeline register")
             self.if_id.clear()
-            self.flush = False
             return
         
         instruction = self.if_id.read("instruction")
@@ -126,10 +121,6 @@ class ISASimulator:
             return
         
         decoded = self.control_unit.decode(instruction)
-        
-        # Debug the decoded instruction
-        print(f"Decoded instruction: opcode={decoded['opcode']}, dest_reg={decoded['dest_reg']}, " +
-            f"src1_reg={decoded['src1_reg']}, src2_reg={decoded['src2_reg']}, imm={decoded['immediate']}")
         
         # Track register reads in decode stage
         src1_reg = decoded["src1_reg"]
@@ -143,7 +134,59 @@ class ISASimulator:
             src2_val = self.reg_file.read(src2_reg)
             self.register_debugger.track_register_read('decode', src2_reg, src2_val)
         
-        # Write to ID/EX pipeline register
+        # ===== DATA FORWARDING TO DECODE STAGE =====
+        # Forward from EX/MEM if needed
+        if (self.ex_mem.read("control") and 
+            self.ex_mem.read("control").get("reg_write") and 
+            self.ex_mem.read("dest_reg") != 0):
+            
+            ex_mem_dest = self.ex_mem.read("dest_reg")
+            
+            # Forward to src1 if needed
+            if ex_mem_dest == src1_reg:
+                src1_val = self.ex_mem.read("alu_result")
+                if self.debug:
+                    print(f"Forwarding EX/MEM to src1 in decode: R{src1_reg} = {src1_val}")
+            
+            # Forward to src2 if needed
+            if ex_mem_dest == src2_reg:
+                src2_val = self.ex_mem.read("alu_result")
+                if self.debug:
+                    print(f"Forwarding EX/MEM to src2 in decode: R{src2_reg} = {src2_val}")
+
+        # Forward from MEM/WB if needed
+        if (self.mem_wb.read("control") and 
+            self.mem_wb.read("control").get("reg_write") and 
+            self.mem_wb.read("dest_reg") != 0):
+            
+            mem_wb_dest = self.mem_wb.read("dest_reg")
+            mem_wb_data = self.mem_wb.read("alu_result")
+            
+            # If loading from memory, use memory data
+            if self.mem_wb.read("control").get("mem_to_reg") and self.mem_wb.read("mem_data") is not None:
+                mem_wb_data = self.mem_wb.read("mem_data")
+            
+            # Forward to src1 if needed (and not already forwarded from EX/MEM)
+            if mem_wb_dest == src1_reg:
+                # Only forward if EX/MEM isn't already forwarding to this register
+                if not (self.ex_mem.read("control") and 
+                    self.ex_mem.read("control").get("reg_write") and 
+                    self.ex_mem.read("dest_reg") == src1_reg):
+                    src1_val = mem_wb_data
+                    if self.debug:
+                        print(f"Forwarding MEM/WB to src1 in decode: R{src1_reg} = {src1_val}")
+            
+            # Forward to src2 if needed (and not already forwarded from EX/MEM)
+            if mem_wb_dest == src2_reg:
+                # Only forward if EX/MEM isn't already forwarding to this register
+                if not (self.ex_mem.read("control") and 
+                    self.ex_mem.read("control").get("reg_write") and 
+                    self.ex_mem.read("dest_reg") == src2_reg):
+                    src2_val = mem_wb_data
+                    if self.debug:
+                        print(f"Forwarding MEM/WB to src2 in decode: R{src2_reg} = {src2_val}")
+        # ===== END DATA FORWARDING TO DECODE STAGE =====
+        
         self.id_ex.write("control", {
             "reg_write": self.control_unit.reg_write,
             "mem_read": self.control_unit.mem_read,
@@ -162,6 +205,8 @@ class ISASimulator:
         self.id_ex.write("src2_reg", decoded["src2_reg"])
         self.id_ex.write("opcode", decoded["opcode"])
         self.id_ex.write("pc", self.if_id.read("pc"))
+        
+        # Pass the instruction to the next stage
         self.id_ex.write("instruction", instruction)
         
         if self.debug:
@@ -172,9 +217,10 @@ class ISASimulator:
     def _fetch_stage(self):
         """Instruction Fetch (IF) stage."""
         if self.flush:
-            print("Flush active in fetch stage, clearing IF/ID pipeline register")
+            if self.debug:
+                print("Flush active in fetch stage, clearing IF/ID pipeline register")
             self.if_id.clear()
-            self.flush = False
+            self.flush = False  # Reset flush after handling
             return
         
         if not self.stall:
@@ -196,24 +242,22 @@ class ISASimulator:
             if self.debug:
                 print(f"Fetch stage stalled at PC=0x{self.reg_file.pc:08X}")
 
-
     def _execute_stage(self):
-        """Execute (EX) stage with fixed operand handling."""
+        """Execute (EX) stage with data forwarding."""
         control = self.id_ex.read("control")
         if control is None:
             return
         
-        instruction = self.id_ex.read("instruction")
         src1_val = self.id_ex.read("src1_val")
         src2_val = self.id_ex.read("src2_val")
         immediate = self.id_ex.read("immediate")
         opcode = self.id_ex.read("opcode")
+        pc = self.id_ex.read("pc")
+        instruction = self.id_ex.read("instruction")
+        
+        # Get register numbers for forwarding
         src1_reg = self.id_ex.read("src1_reg")
         src2_reg = self.id_ex.read("src2_reg")
-        pc = self.id_ex.read("pc")
-        
-        # Debug the register values
-        print(f"Execute stage: src1_reg=R{src1_reg}({src1_val}), src2_reg=R{src2_reg}({src2_val})")
         
         # Track register usage in execute stage
         self.register_debugger.track_register_read('execute', src1_reg, src1_val)
@@ -221,74 +265,107 @@ class ISASimulator:
         if not control["alu_src"]:  # Only if using register for src2
             self.register_debugger.track_register_read('execute', src2_reg, src2_val)
         
-        # Track if forwarding has occurred
-        forwarded_src1 = False
-        forwarded_src2 = False
+        # ===== DATA FORWARDING LOGIC =====
         
-        # Forward from EX/MEM (highest priority)
-        if self.ex_mem.read("control") and self.ex_mem.read("control").get("reg_write"):
+        # Forward from EX/MEM if needed
+        if (self.ex_mem.read("control") and 
+            self.ex_mem.read("control").get("reg_write") and 
+            self.ex_mem.read("dest_reg") != 0):
+            
             ex_mem_dest = self.ex_mem.read("dest_reg")
-            if ex_mem_dest != 0:  # R0 is always 0
-                # Forward to src1 if needed
-                if ex_mem_dest == src1_reg and not forwarded_src1:
-                    src1_val = self.ex_mem.read("alu_result")
-                    forwarded_src1 = True
+            
+            # Forward to src1 if needed
+            if ex_mem_dest == src1_reg:
+                src1_val = self.ex_mem.read("alu_result")
+                if self.debug:
                     print(f"Forwarding EX/MEM to src1: R{src1_reg} = {src1_val}")
-                
-                # Forward to src2 if needed and not using immediate
-                if not control["alu_src"] and ex_mem_dest == src2_reg and not forwarded_src2:
-                    src2_val = self.ex_mem.read("alu_result")
-                    forwarded_src2 = True
+            
+            # Forward to src2 if needed (and not using immediate)
+            if not control["alu_src"] and ex_mem_dest == src2_reg:
+                src2_val = self.ex_mem.read("alu_result")
+                if self.debug:
                     print(f"Forwarding EX/MEM to src2: R{src2_reg} = {src2_val}")
         
-        # Forward from MEM/WB (lower priority)
-        if self.mem_wb.read("control") and self.mem_wb.read("control").get("reg_write"):
+        # Forward from MEM/WB if needed
+        if (self.mem_wb.read("control") and 
+            self.mem_wb.read("control").get("reg_write") and 
+            self.mem_wb.read("dest_reg") != 0):
+            
             mem_wb_dest = self.mem_wb.read("dest_reg")
-            if mem_wb_dest != 0:  # R0 is always 0
-                # Get the correct data
-                mem_wb_data = self.mem_wb.read("alu_result")
-                if self.mem_wb.read("control").get("mem_to_reg") and self.mem_wb.read("mem_data") is not None:
-                    mem_wb_data = self.mem_wb.read("mem_data")
-                
-                # Forward to src1 if needed and not already forwarded
-                if mem_wb_dest == src1_reg and not forwarded_src1:
+            mem_wb_data = self.mem_wb.read("alu_result")
+            
+            # If loading from memory, use memory data
+            if self.mem_wb.read("control").get("mem_to_reg") and self.mem_wb.read("mem_data") is not None:
+                mem_wb_data = self.mem_wb.read("mem_data")
+            
+            # Forward to src1 if needed (and not already forwarded from EX/MEM)
+            if mem_wb_dest == src1_reg:
+                # Only forward if EX/MEM isn't already forwarding to this register
+                if not (self.ex_mem.read("control") and 
+                       self.ex_mem.read("control").get("reg_write") and 
+                       self.ex_mem.read("dest_reg") == src1_reg):
                     src1_val = mem_wb_data
-                    forwarded_src1 = True
-                    print(f"Forwarding MEM/WB to src1: R{src1_reg} = {src1_val}")
-                
-                # Forward to src2 if needed and not already forwarded
-                if not control["alu_src"] and mem_wb_dest == src2_reg and not forwarded_src2:
+                    if self.debug:
+                        print(f"Forwarding MEM/WB to src1: R{src1_reg} = {src1_val}")
+            
+            # Forward to src2 if needed (and not using immediate, and not already forwarded from EX/MEM)
+            if not control["alu_src"] and mem_wb_dest == src2_reg:
+                # Only forward if EX/MEM isn't already forwarding to this register
+                if not (self.ex_mem.read("control") and 
+                       self.ex_mem.read("control").get("reg_write") and 
+                       self.ex_mem.read("dest_reg") == src2_reg):
                     src2_val = mem_wb_data
-                    forwarded_src2 = True
-                    print(f"Forwarding MEM/WB to src2: R{src2_reg} = {src2_val}")
+                    if self.debug:
+                        print(f"Forwarding MEM/WB to src2: R{src2_reg} = {src2_val}")
         
-        # After all forwarding, print the final values
-        print(f"Final operand values: src1=R{src1_reg}({src1_val}), src2=" + 
-            (f"R{src2_reg}({src2_val})" if not control["alu_src"] else f"imm({immediate})"))
+        # Special handling for MUL-DIV dependency
+        if (opcode == self.control_unit.DIV and 
+            self.ex_mem.read("opcode") == self.control_unit.MUL and
+            self.ex_mem.read("dest_reg") == src1_reg):
+            
+            src1_val = self.ex_mem.read("alu_result")
+            if self.debug:
+                print(f"Special MUL-DIV forwarding: R{src1_reg} = {src1_val}")
+        
+        # ===== END DATA FORWARDING LOGIC =====
         
         # Use the potentially forwarded values
         operand2 = immediate if control["alu_src"] else src2_val
         
-        # Execute ALU operation
+        # Determine ALU operation
         if opcode == self.control_unit.MOVI:
             alu_op = self.alu.OP_MOV
         else:
             alu_op = opcode & 0x0F
         
-        # Print the operation for debugging
-        if alu_op == self.alu.OP_XOR:
-            print(f"XOR: {src1_val} ^ {operand2} == {src1_val ^ operand2}")
-        elif alu_op == self.alu.OP_ADD:
-            print(f"ADD: {src1_val} + {operand2}")
-        elif alu_op == self.alu.OP_SUB:
-            print(f"SUB: {src1_val} - {operand2}")
-        
+        # Execute ALU operation
         result = self.alu.execute(alu_op, src1_val, operand2)
         
+        # Debug print for ALU operation
+        if self.debug:
+            op_names = {
+                self.alu.OP_ADD: "ADD",
+                self.alu.OP_SUB: "SUB",
+                self.alu.OP_AND: "AND",
+                self.alu.OP_OR: "OR",
+                self.alu.OP_XOR: "XOR",
+                self.alu.OP_SLL: "SLL",
+                self.alu.OP_SRL: "SRL",
+                self.alu.OP_SRA: "SRA",
+                self.alu.OP_SLT: "SLT",
+                self.alu.OP_MUL: "MUL",
+                self.alu.OP_DIV: "DIV",
+                self.alu.OP_MOV: "MOV"
+            }
+            op_name = op_names.get(alu_op, f"Unknown({alu_op})")
+            print(f"{op_name}: {src1_val} {op_name.lower()} {operand2}")
+        
+        # Calculate branch target if needed
         branch_target = None
         if control["branch"] or control["jump"]:
             branch_target = pc + (immediate << 2)
         
+        # Pass results to EX/MEM register
         self.ex_mem.write("control", control)
         self.ex_mem.write("alu_result", result)
         self.ex_mem.write("src2_val", src2_val)
@@ -299,6 +376,7 @@ class ISASimulator:
         # Pass the instruction to the next stage
         self.ex_mem.write("instruction", instruction)
         
+        # Handle branches and jumps
         take_branch = False
         if control["branch"]:
             if opcode == self.control_unit.BEQ:
@@ -330,25 +408,6 @@ class ISASimulator:
             self.flush = True
             # Track PC update in execute stage for jump
             self.register_debugger.track_register_write('execute', 'pc', branch_target)
-        
-        # In execute_stage, make sure to forward from ALL pipeline stages
-        # Forward from EX/MEM
-        if self.ex_mem.read("control") and self.ex_mem.read("control").get("reg_write"):
-            ex_mem_dest = self.ex_mem.read("dest_reg")
-            if ex_mem_dest == src1_reg:
-                src1_val = self.ex_mem.read("alu_result")
-                print(f"Forwarding EX/MEM to src1: R{src1_reg} = {src1_val}")
-
-        # Forward from MEM/WB
-        if self.mem_wb.read("control") and self.mem_wb.read("control").get("reg_write"):
-            mem_wb_dest = self.mem_wb.read("dest_reg")
-            if mem_wb_dest == src1_reg:
-                mem_wb_data = self.mem_wb.read("alu_result")
-                if self.mem_wb.read("control").get("mem_to_reg"):
-                    mem_wb_data = self.mem_wb.read("mem_data")
-                src1_val = mem_wb_data
-                print(f"Forwarding MEM/WB to src1: R{src1_reg} = {src1_val}")
-
     
     def _memory_stage(self):
         """Memory Access (MEM) stage."""
@@ -366,12 +425,16 @@ class ISASimulator:
                 mem_data = self.memory.read_word(alu_result)
                 # Track memory read
                 self.register_debugger.track_register_read('memory', 'mem', alu_result)
+                if self.debug:
+                    print(f"Memory read: address=0x{alu_result:08X}, data=0x{mem_data:08X}")
             elif control["mem_write"]:
                 # Store operation
                 src2_val = self.ex_mem.read("src2_val")
                 self.memory.write_word(alu_result, src2_val)
                 # Track memory write
                 self.register_debugger.track_register_write('memory', 'mem', src2_val)
+                if self.debug:
+                    print(f"Memory write: address=0x{alu_result:08X}, data=0x{src2_val:08X}")
         except ValueError as e:
             if self.debug:
                 print(f"Memory access error: {e}")
@@ -382,24 +445,22 @@ class ISASimulator:
         self.mem_wb.write("alu_result", alu_result)
         self.mem_wb.write("mem_data", mem_data)
         self.mem_wb.write("dest_reg", self.ex_mem.read("dest_reg"))
+        self.mem_wb.write("opcode", self.ex_mem.read("opcode"))
         
         # Pass the instruction to the next stage
         self.mem_wb.write("instruction", instruction)
     
     def _writeback_stage(self):
-        """Write Back (WB) stage with tracking to prevent multiple writebacks."""
+        """Write Back (WB) stage."""
         control = self.mem_wb.read("control")
-        instruction = self.mem_wb.read("instruction")
-        
-        # Skip if nothing to write back or instruction already completed
-        if control is None or getattr(self, "_completed_instructions", set()).intersection({instruction}):
-            return
+        if control is None:
+            return  # Nothing to write back
         
         if control["reg_write"]:
             dest_reg = self.mem_wb.read("dest_reg")
             
             # Determine write data source
-            if control["mem_to_reg"]:
+            if control["mem_to_reg"] and self.mem_wb.read("mem_data") is not None:
                 write_data = self.mem_wb.read("mem_data")
             else:
                 write_data = self.mem_wb.read("alu_result")
@@ -409,66 +470,62 @@ class ISASimulator:
                 self.reg_file.write(dest_reg, write_data)
                 # Track register write in writeback stage
                 self.register_debugger.track_register_write('writeback', dest_reg, write_data)
-                print(f"Writeback: Writing {write_data} to R{dest_reg}")
+                if self.debug:
+                    print(f"Writeback: R{dest_reg} = 0x{write_data:08X} ({write_data})")
             
             self.instructions_executed += 1
-        
-        # Mark this instruction as completed
-        if not hasattr(self, "_completed_instructions"):
-            self._completed_instructions = set()
-        if instruction is not None:
-            self._completed_instructions.add(instruction)
+            
+            # Check if this is a HALT instruction
+            opcode = self.mem_wb.read("opcode")
+            if opcode == self.control_unit.HALT:
+                if self.debug:
+                    print("HALT instruction in writeback stage")
+                self.control_unit.halt_flag = True
     
     def _hazard_detection(self):
-        """Optimized hazard detection to minimize unnecessary stalls."""
-        # Reset stall flag by default
-        should_stall = False
-        stall_reason = ""
+        """Enhanced hazard detection for data dependencies."""
+        # Reset stall flag at the beginning of hazard detection
+        stall_needed = False
         
-        # Get the instruction in decode stage
+        # Get the instruction in IF/ID stage
         if_id_instr = self.if_id.read("instruction")
         if if_id_instr is None:
-            self.stall = False
+            self.stall = stall_needed
             return
         
         # Decode the instruction to check register dependencies
-        decoded = self.control_unit.decode(if_id_instr)
-        src1_reg = decoded["src1_reg"]
-        src2_reg = decoded["src2_reg"]
-        uses_src2 = not decoded.get("alu_src", False)  # Only check src2 if not using immediate
+        next_decoded = self.control_unit.decode(if_id_instr)
+        next_src1 = next_decoded["src1_reg"]
+        next_src2 = next_decoded["src2_reg"]
         
-        # Check if ID/EX is writing to a register that IF/ID needs to read
+        # 1. Check ID/EX stage for RAW hazards
         if self.id_ex.read("control") and self.id_ex.read("control").get("reg_write"):
             id_ex_dest = self.id_ex.read("dest_reg")
             
-            # Only stall if:
-            # 1. The destination register is not R0
-            # 2. The destination register is needed by the next instruction
-            # 3. The instruction in ID/EX is a load (which won't have result until MEM stage)
-            if (id_ex_dest != 0 and 
-                (id_ex_dest == src1_reg or (uses_src2 and id_ex_dest == src2_reg)) and
-                self.id_ex.read("control").get("mem_read")):
-                
-                should_stall = True
-                stall_reason = f"ID/EX load writing to R{id_ex_dest}, needed by next instruction"
+            # Special handling for load instructions (need extra stall)
+            if self.id_ex.read("control").get("mem_read") and id_ex_dest != 0:
+                if id_ex_dest in [next_src1, next_src2]:
+                    stall_needed = True
+                    if self.debug:
+                        print(f"Stalling: Load to R{id_ex_dest} in ID/EX, needed by next instruction")
         
-        # Check if EX/MEM is writing to a register that IF/ID needs to read
-        # Only stall if we can't forward the result (e.g., for loads)
-        if not should_stall and self.ex_mem.read("control") and self.ex_mem.read("control").get("reg_write"):
+        # 2. Check EX/MEM stage for RAW hazards
+        if self.ex_mem.read("control") and self.ex_mem.read("control").get("reg_write"):
             ex_mem_dest = self.ex_mem.read("dest_reg")
             
-            # Only stall for loads, as other results can be forwarded
-            if (ex_mem_dest != 0 and 
-                (ex_mem_dest == src1_reg or (uses_src2 and ex_mem_dest == src2_reg)) and
-                self.ex_mem.read("control").get("mem_read")):
+            # Special handling for MUL-DIV dependency
+            if (self.ex_mem.read("opcode") == self.control_unit.MUL and 
+                next_decoded["opcode"] == self.control_unit.DIV and
+                ex_mem_dest == next_src1):
                 
-                should_stall = True
-                stall_reason = f"EX/MEM load writing to R{ex_mem_dest}, needed by next instruction"
+                stall_needed = True
+                if self.debug:
+                    print(f"Stalling: MUL to R{ex_mem_dest} in EX/MEM, needed by DIV instruction")
         
-        # Update stall status
-        if should_stall:
-            self.stall = True
+        # 3. Check for structural hazards (not implemented in this simple model)
+        
+        # Update stall flag
+        if stall_needed and not self.stall:
             self.stall_cycles += 1
-            print(f"Stalling: {stall_reason}")
-        else:
-            self.stall = False
+        
+        self.stall = stall_needed
