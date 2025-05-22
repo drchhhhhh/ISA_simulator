@@ -781,7 +781,7 @@ HALT
             self._stop()
     
     def _setup_stats_tab(self):
-        """Setup the statistics visualization tab."""
+        """Setup the statistics visualization tab with instruction-specific analytics."""
         frame = ttk.Frame(self.stats_tab)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
@@ -810,24 +810,56 @@ HALT
         self.ipc_label = ttk.Label(metrics_grid, text="0.00")
         self.ipc_label.grid(row=1, column=3, sticky=tk.W, padx=5, pady=2)
         
+        # Row 3 - Add CPI (Cycles Per Instruction)
+        ttk.Label(metrics_grid, text="CPI:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        self.cpi_label = ttk.Label(metrics_grid, text="0.00")
+        self.cpi_label.grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
+        
+        ttk.Label(metrics_grid, text="Pipeline Efficiency:").grid(row=2, column=2, sticky=tk.W, padx=5, pady=2)
+        self.efficiency_label = ttk.Label(metrics_grid, text="0.00%")
+        self.efficiency_label.grid(row=2, column=3, sticky=tk.W, padx=5, pady=2)
+        
         # Instruction mix visualization
-        instr_frame = ttk.LabelFrame(frame, text="Instruction Mix")
+        instr_frame = ttk.LabelFrame(frame, text="Instruction Distribution")
         instr_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Add button to display stats history table
-        ttk.Button(instr_frame, text="Refresh", 
-                command=self.update_instruction_mix_plot).pack(pady=5)
+        # Add control buttons for visualization options
+        control_frame = ttk.Frame(instr_frame)
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Add visualization type selector
+        ttk.Label(control_frame, text="Visualization:").pack(side=tk.LEFT, padx=5)
+        self.viz_type = tk.StringVar(value="pie")
+        viz_combo = ttk.Combobox(control_frame, textvariable=self.viz_type, 
+                                values=["pie", "bar", "table"], width=10)
+        viz_combo.pack(side=tk.LEFT, padx=5)
+        viz_combo.bind("<<ComboboxSelected>>", lambda e: self._update_instruction_mix())
+        
+        # Add refresh button
+        ttk.Button(control_frame, text="Refresh", 
+                command=self._update_instruction_mix).pack(side=tk.RIGHT, padx=5)
+        
+        # Create frame for visualization
+        viz_frame = ttk.Frame(instr_frame)
+        viz_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Create matplotlib figure for instruction mix
         self.instr_fig = Figure(figsize=(6, 4), dpi=100)
         self.instr_ax = self.instr_fig.add_subplot(111)
-        self.instr_ax.set_title("Instruction Type Distribution")
+        self.instr_ax.set_title("Instruction Distribution")
         
         # Create canvas for the figure
-        self.instr_canvas = FigureCanvasTkAgg(self.instr_fig, master=instr_frame)
+        self.instr_canvas = FigureCanvasTkAgg(self.instr_fig, master=viz_frame)
         self.instr_canvas.draw()
         self.instr_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-    
+        
+        # Create table for instruction statistics
+        self.stats_table_frame = ttk.Frame(viz_frame)
+        
+        # Initialize the visualization
+        self._update_instruction_mix()
+
+        
     def _assemble_from_editor(self):
         """Assemble and load instructions from the editor."""
         # Get assembly code from editor
@@ -1346,47 +1378,150 @@ HALT
         self.pipe_fig.tight_layout()
         self.pipe_canvas.draw()
     
-    def update_instruction_mix_plot(self):
-        """Update the instruction mix visualization."""
-        if not self.state_history:
+    def _update_instruction_mix(self):
+        """Update the instruction mix visualization with instruction-specific data."""
+        # Clear previous visualization
+        self.instr_ax.clear()
+        
+        # Hide the table frame initially
+        self.stats_table_frame.pack_forget()
+        
+        # Count instructions by specific opcode
+        instr_counts = {}
+        total_instructions = 0
+        
+        # Map opcode values to instruction names
+        opcode_to_name = {}
+        for name, value in vars(self.simulator.control_unit.__class__).items():
+            if isinstance(value, int) and not name.startswith('_'):
+                opcode_to_name[value] = name
+        
+        # Process all instructions that have been executed
+        for state in self.simulator.pipeline_stages:
+            for stage in ['fetch', 'decode', 'execute', 'memory', 'writeback']:
+                instr = state[stage]
+                if instr is not None:
+                    try:
+                        # Extract opcode
+                        opcode = (instr >> 24) & 0xFF
+                        
+                        # Get instruction name
+                        if opcode in opcode_to_name:
+                            instr_name = opcode_to_name[opcode]
+                        else:
+                            instr_name = f"UNKNOWN (0x{opcode:02X})"
+                        
+                        # Count this instruction
+                        if instr_name not in instr_counts:
+                            instr_counts[instr_name] = 0
+                        instr_counts[instr_name] += 1
+                        total_instructions += 1
+                    except:
+                        pass
+        
+        # If no instructions, show message
+        if not instr_counts:
+            self.instr_ax.text(0.5, 0.5, "No instructions executed", 
+                            horizontalalignment='center', verticalalignment='center',
+                            transform=self.instr_ax.transAxes, fontsize=14)
+            self.instr_canvas.draw()
             return
         
-        self.instr_ax.clear()
-        self.instr_ax.set_title("Instruction Type Distribution")
+        # Sort instructions by count (descending)
+        sorted_instrs = sorted(instr_counts.items(), key=lambda x: x[1], reverse=True)
         
-        # Count instruction types
-        instr_types = {}
+        # Get visualization type
+        viz_type = self.viz_type.get()
         
-        for state in self.state_history:
-            for reg_name in ['if_id', 'id_ex', 'ex_mem', 'mem_wb']:
-                reg_data = state['pipeline'][reg_name]
-                if reg_data and 'opcode' in reg_data:
-                    opcode = reg_data['opcode']
-                    
-                    # Determine instruction type from opcode
-                    if 0x00 <= opcode <= 0x1F:
-                        instr_type = "Data Processing"
-                    elif 0x20 <= opcode <= 0x3F:
-                        instr_type = "Memory Access"
-                    elif 0x40 <= opcode <= 0x5F:
-                        instr_type = "Control Flow"
-                    elif 0x60 <= opcode <= 0x7F:
-                        instr_type = "System Ops"
-                    else:
-                        instr_type = "Unknown"
-                    
-                    instr_types[instr_type] = instr_types.get(instr_type, 0) + 1
-        
-        if instr_types:
-            # Plot as pie chart
-            labels = list(instr_types.keys())
-            sizes = list(instr_types.values())
+        if viz_type == "pie":
+            # Create pie chart
+            labels = [f"{name} ({count})" for name, count in sorted_instrs]
+            sizes = [count for _, count in sorted_instrs]
             
-            self.instr_ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
-            self.instr_ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle
+            # Use a colormap for better color distribution
+            import matplotlib.cm as cm
+            colors = cm.viridis(np.linspace(0, 1, len(labels)))
             
-            self.instr_fig.tight_layout()
-            self.instr_canvas.draw()
+            self.instr_ax.pie(sizes, labels=labels, autopct='%1.1f%%', 
+                            startangle=90, colors=colors)
+            self.instr_ax.axis('equal')  # Equal aspect ratio ensures pie is drawn as a circle
+            self.instr_ax.set_title("Instruction Distribution")
+            
+        elif viz_type == "bar":
+            # Create bar chart
+            names = [name for name, _ in sorted_instrs]
+            counts = [count for _, count in sorted_instrs]
+            
+            # Use a colormap for better color distribution
+            import matplotlib.cm as cm
+            colors = cm.viridis(np.linspace(0, 1, len(names)))
+            
+            bars = self.instr_ax.bar(range(len(names)), counts, color=colors)
+            self.instr_ax.set_xticks(range(len(names)))
+            self.instr_ax.set_xticklabels(names, rotation=45, ha='right')
+            self.instr_ax.set_title("Instruction Distribution")
+            self.instr_ax.set_xlabel("Instruction")
+            self.instr_ax.set_ylabel("Count")
+            
+            # Add count labels on top of bars
+            for bar in bars:
+                height = bar.get_height()
+                self.instr_ax.text(bar.get_x() + bar.get_width()/2., height + 0.1,
+                                f'{height}', ha='center', va='bottom')
+        
+        elif viz_type == "table":
+            # Hide the matplotlib figure
+            self.instr_canvas.get_tk_widget().pack_forget()
+            
+            # Show the table frame
+            self.stats_table_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Clear any existing widgets in the table frame
+            for widget in self.stats_table_frame.winfo_children():
+                widget.destroy()
+            
+            # Create a treeview for the instruction statistics
+            columns = ("instruction", "count", "percentage")
+            stats_table = ttk.Treeview(self.stats_table_frame, columns=columns, show="headings")
+            
+            # Define column headings
+            stats_table.heading("instruction", text="Instruction")
+            stats_table.heading("count", text="Count")
+            stats_table.heading("percentage", text="Percentage")
+            
+            # Define column widths
+            stats_table.column("instruction", width=150, anchor="w")
+            stats_table.column("count", width=100, anchor="center")
+            stats_table.column("percentage", width=100, anchor="center")
+            
+            # Add scrollbars
+            vsb = ttk.Scrollbar(self.stats_table_frame, orient="vertical", command=stats_table.yview)
+            hsb = ttk.Scrollbar(self.stats_table_frame, orient="horizontal", command=stats_table.xview)
+            stats_table.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            
+            # Grid layout for table and scrollbars
+            stats_table.grid(column=0, row=0, sticky="nsew")
+            vsb.grid(column=1, row=0, sticky="ns")
+            hsb.grid(column=0, row=1, sticky="ew")
+            
+            # Configure grid weights
+            self.stats_table_frame.columnconfigure(0, weight=1)
+            self.stats_table_frame.rowconfigure(0, weight=1)
+            
+            # Add data to the table
+            for name, count in sorted_instrs:
+                percentage = (count / total_instructions) * 100
+                stats_table.insert("", "end", values=(name, count, f"{percentage:.2f}%"))
+            
+            # Return early since we're using the table instead of the matplotlib figure
+            return
+        
+        # Update the figure
+        self.instr_fig.tight_layout()
+        self.instr_canvas.draw()
+        
+        # Make sure the canvas is visible (in case we switched from table view)
+        self.instr_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             
     def update_pipeline_activity_plot(self):
         """Update the pipeline activity visualization."""
