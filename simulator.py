@@ -323,9 +323,10 @@ class ISASimulator:
     
     def _hazard_detection(self):
         """Detect and handle data hazards."""
-        # Check for data hazards (RAW - Read After Write)
-        id_ex_control = self.id_ex.read("control")
-        if id_ex_control and id_ex_control.get("mem_read"):
+        # Check for RAW hazards in all pipeline stages
+        
+        # 1. Check if ID/EX is writing to a register that IF/ID needs to read
+        if self.id_ex.read("control") and self.id_ex.read("control").get("reg_write"):
             id_ex_dest = self.id_ex.read("dest_reg")
             if_id_instr = self.if_id.read("instruction")
             
@@ -333,8 +334,40 @@ class ISASimulator:
                 # Decode next instruction to check register dependencies
                 next_decoded = self.control_unit.decode(if_id_instr)
                 
-                # Check if next instruction uses the result of current load
+                # Check if next instruction uses the result of current instruction
                 if id_ex_dest in [next_decoded["src1_reg"], next_decoded["src2_reg"]]:
+                    # Stall the pipeline
+                    self.stall = True
+                    self.stall_cycles += 1
+                    return
+        
+        # 2. Check if EX/MEM is writing to a register that IF/ID needs to read
+        if self.ex_mem.read("control") and self.ex_mem.read("control").get("reg_write"):
+            ex_mem_dest = self.ex_mem.read("dest_reg")
+            if_id_instr = self.if_id.read("instruction")
+            
+            if if_id_instr is not None:
+                # Decode next instruction to check register dependencies
+                next_decoded = self.control_unit.decode(if_id_instr)
+                
+                # Check if next instruction uses the result of current instruction
+                if ex_mem_dest in [next_decoded["src1_reg"], next_decoded["src2_reg"]]:
+                    # Stall the pipeline
+                    self.stall = True
+                    self.stall_cycles += 1
+                    return
+        
+        # 3. Check if MEM/WB is writing to a register that IF/ID needs to read
+        if self.mem_wb.read("control") and self.mem_wb.read("control").get("reg_write"):
+            mem_wb_dest = self.mem_wb.read("dest_reg")
+            if_id_instr = self.if_id.read("instruction")
+            
+            if if_id_instr is not None:
+                # Decode next instruction to check register dependencies
+                next_decoded = self.control_unit.decode(if_id_instr)
+                
+                # Check if next instruction uses the result of current instruction
+                if mem_wb_dest in [next_decoded["src1_reg"], next_decoded["src2_reg"]]:
                     # Stall the pipeline
                     self.stall = True
                     self.stall_cycles += 1
