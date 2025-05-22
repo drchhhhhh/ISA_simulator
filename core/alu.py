@@ -40,12 +40,15 @@ class ALU:
                 
         elif op_code == self.OP_AND:
             result = operand1 & operand2
+            print(f"AND: {operand1} & {operand2} == {result}")
             
         elif op_code == self.OP_OR:
             result = operand1 | operand2
+            print(f"OR: {operand1} | {operand2} == {result}")
             
         elif op_code == self.OP_XOR:
             result = operand1 ^ operand2
+            print(f"XOR: {operand1} ^ {operand2} == {result}")
             
         elif op_code == self.OP_SLL:
             result = operand1 << (operand2 & 0x1F)  # Use only bottom 5 bits for shift
