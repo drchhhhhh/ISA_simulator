@@ -62,7 +62,8 @@ Defines the interface between software and hardware. ISA-Sim implements a **fixe
 - Performance metrics (IPC, CPI, Efficiency)  
 - Memory-mapped I/O with simulated peripherals  
 - Complete test suite and robust error handling
-
+<img src="https://i.ibb.co/TM5hQ2QW/1.png"><br><br>
+<img src="https://i.ibb.co/TM5hQ2QW/2.png"><br><br>
 ---
 
 ## <a name="purpose"></a>Purpose 🧭  
@@ -151,8 +152,6 @@ HALT
 - Superscalar pipeline
 - Web-based GUI
 - Curriculum integration
-<img src="https://i.ibb.co/TM5hQ2QW/1.png"><br><br>
-<img src="https://i.ibb.co/TM5hQ2QW/2.png"><br><br>
 ---
 
 ## <a name="prereqs"></a>Prerequisites ⚙️  
