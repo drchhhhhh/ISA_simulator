@@ -151,8 +151,8 @@ HALT
 - Superscalar pipeline
 - Web-based GUI
 - Curriculum integration
-<img src="https://i.ibb.co/nDVDnQG/1.png"><br><br>
-<img src="https://i.ibb.co/nDVDnQG/2.png"><br><br>
+<img src="https://i.ibb.co/TM5hQ2QW/1.png"><br><br>
+<img src="https://i.ibb.co/TM5hQ2QW/2.png"><br><br>
 ---
 
 ## <a name="prereqs"></a>Prerequisites ⚙️  
